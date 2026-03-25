@@ -34,7 +34,7 @@ if [ -d ".venv" ] && [ -x "$PY" ]; then
     $PY -c "import torch" 2>/dev/null && check "PyTorch" || check "PyTorch MISSING"
     $PY -c "import transformers" 2>/dev/null && check "Transformers" || check "Transformers MISSING"
     $PY -c "import mss" 2>/dev/null && check "mss (screen capture)" || check "mss MISSING"
-    $PY -c "import pyautogui" 2>/dev/null && check "pyautogui (actions)" || check "pyautogui MISSING"
+    $PY -c "import importlib.util; s=importlib.util.find_spec('pyautogui'); assert s" 2>/dev/null && check "pyautogui (actions)" || check "pyautogui MISSING"
     $PY -c "import mcp" 2>/dev/null && check "mcp SDK" || check "mcp SDK MISSING"
     $PY -c "import pytermgui" 2>/dev/null && check "pytermgui (TUI)" || check "pytermgui MISSING"
 fi
