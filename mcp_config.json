@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ui-agent": {
+      "command": "python3",
+      "args": ["server.py"],
+      "cwd": "/home/ashil/openclaw/workspace/ui-agent-mcp",
+      "env": {
+        "VISION_MODEL": "florence-2-base",
+        "DEVICE": "cpu"
+      }
+    }
+  }
+}
