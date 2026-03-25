@@ -303,8 +303,8 @@ def build_footer() -> ptg.Container:
 def main():
     with ptg.WindowManager() as manager:
         # Set dark theme
-        ptg.Colorsystem().set_default("border", "#369EFF")
-        ptg.Colorsystem().set_default("corner", "#FFCB47")
+        ptg.ColorSystem().set_default("border", "#369EFF")
+        ptg.ColorSystem().set_default("corner", "#FFCB47")
 
         # Layout: Top to bottom
         manager.layout.add_slot("header")
