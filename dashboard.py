@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""
-UI Agent MCP — Btop-Style Dashboard v3
-Pure ANSI, properly aligned two-column layout.
-"""
+"""UI Agent MCP — Btop-Style Dashboard v4 — Fixed."""
 
-import sys, os, time, json, subprocess, threading, shutil, select
+import sys, os, time, json, subprocess, threading, shutil, select, re
 from pathlib import Path
 from collections import deque
 from datetime import datetime
@@ -16,57 +13,65 @@ def sh(c, t=10):
     try:
         r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=t)
         return (r.stdout or r.stderr).strip()
-    except:
-        return ""
+    except: return ""
+
+# ── ANSI ──
+R  = "\033[0m"
+B  = "\033[1m"
+D  = "\033[2m"
+HI = "\033[?25l"
+SH = "\033[?25h"
+HM = "\033[H"
+CL = "\033[2J"
+ED = "\033[J"  # erase to end of screen
+
+RED = "\033[1;31m"; GRN = "\033[1;32m"; YEL = "\033[1;33m"
+CYN = "\033[1;36m"; WHT = "\033[1;37m"; GRY = "\033[2;37m"
+GLD = "\033[1;38;5;220m"; ORG = "\033[1;38;5;208m"; PNK = "\033[1;38;5;213m"
+
+def col(p):
+    if p > 80: return RED
+    if p > 60: return ORG
+    if p > 40: return YEL
+    return GRN
+
+def bar(pct, w=18):
+    f = int(pct / 100 * w)
+    c = col(pct)
+    return f"{c}{'█' * f}{D}{'░' * (w - f)}{R} {B}{pct:3.0f}%{R}"
+
+def spark(history, w=20):
+    if not history: return D + "─" * w + R
+    chars = " ▁▂▃▄▅▆▇█"
+    d = list(history)[-w:]
+    lo, hi = min(d), max(d)
+    rng = hi - lo if hi != lo else 1
+    return "".join(chars[min(int((v - lo) / rng * 8), 8)] for v in d)
+
+def sep_line(left, right, w):
+    """Render one line of two side-by-side boxes."""
+    hw = w // 2
+    l = f" {left:<{hw-2}}"[:hw-2]
+    r = f" {right:<{hw-2}}"[:hw-2]
+    return f"│{l} ││{r} │"
+
 
 # ═══════════════════════════════════════════════════════════
-#  ANSI ESCAPE CODES
-# ═══════════════════════════════════════════════════════════
-
-class T:
-    RST  = "\033[0m"
-    BOLD = "\033[1m"
-    DIM  = "\033[2m"
-    HIDE = "\033[?25l"
-    SHOW = "\033[?25h"
-    HOME = "\033[H"
-    CLR  = "\033[2J"
-
-    RED    = "\033[1;31m"
-    GREEN  = "\033[1;32m"
-    YELLOW = "\033[1;33m"
-    BLUE   = "\033[1;34m"
-    CYAN   = "\033[1;36m"
-    WHITE  = "\033[1;37m"
-    GRAY   = "\033[2;37m"
-
-    GOLD   = "\033[1;38;5;220m"
-    ORANGE = "\033[1;38;5;208m"
-    PINK   = "\033[1;38;5;213m"
-    LIME   = "\033[1;38;5;118m"
-
-    @staticmethod
-    def col(pct):
-        if pct > 80: return T.RED
-        if pct > 60: return T.ORANGE
-        if pct > 40: return T.YELLOW
-        return T.GREEN
-
-
-# ═══════════════════════════════════════════════════════════
-#  DATA COLLECTORS
+#  DATA
 # ═══════════════════════════════════════════════════════════
 
 class Data:
     def __init__(self):
-        self.cpu_hist = deque(maxlen=40)
-        self.ram_hist = deque(maxlen=40)
+        self.cpu_h = deque(maxlen=40)
+        self.ram_h = deque(maxlen=40)
 
     def cpu(self):
         o = sh("top -bn1 | grep 'Cpu(s)' | awk '{print 100 - $8}'")
-        try: p = max(0, min(100, float(o)))
-        except: p = 0.0
-        self.cpu_hist.append(p)
+        try:
+            p = max(0, min(100, float(o)))
+        except:
+            p = 0.0
+        self.cpu_h.append(p)
         return p
 
     def ram(self):
@@ -76,19 +81,18 @@ class Data:
             u, t, pct = int(p[0]), int(p[1]), float(p[2])
         else:
             u, t, pct = 0, 1, 0.0
-        self.ram_hist.append(pct)
+        self.ram_h.append(pct)
         fmt = lambda b: f"{b/1024**3:.1f}GiB" if b >= 1024**3 else f"{b/1024**2:.0f}MiB"
         return fmt(u), fmt(t), pct
 
     def gpu(self):
-        o = sh("nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null")
+        o = sh("nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null")
         if not o or "fail" in o.lower(): return []
         gpus = []
         for ln in o.split("\n"):
             p = [x.strip() for x in ln.split(",")]
-            if len(p) >= 6:
-                try:
-                    gpus.append({"name": p[1], "mu": p[2], "mt": p[3], "util": float(p[4]), "temp": float(p[5])})
+            if len(p) >= 5:
+                try: gpus.append({"name": p[0], "mu": p[1], "mt": p[2], "util": float(p[3]), "temp": float(p[4])})
                 except: pass
         return gpus
 
@@ -121,47 +125,6 @@ class Data:
 
 
 # ═══════════════════════════════════════════════════════════
-#  RENDER HELPERS
-# ═══════════════════════════════════════════════════════════
-
-def spark(h, w=20):
-    if not h: return " " * w
-    chars = " ▁▂▃▄▅▆▇█"
-    d = list(h)[-w:]
-    lo, hi = min(d), max(d)
-    rng = hi - lo if hi != lo else 1
-    return "".join(chars[min(int((v - lo) / rng * 8), 8)] for v in d)
-
-def bar(pct, w=18):
-    f = int(pct / 100 * w)
-    c = T.col(pct)
-    return f"{c}{'█' * f}{T.DIM}{'░' * (w - f)}{T.RST} {T.BOLD}{pct:3.0f}%{T.RST}"
-
-def bline(label, pct, w=18):
-    return f"  {label:>4}  {bar(pct, w)}"
-
-# ── Box drawing: all boxes in a pair MUST have same line count ──
-
-def box_pair(left_lines, right_lines, w):
-    """Render two boxes side by side, padding to equal height."""
-    hw = w  # each box width
-    max_lines = max(len(left_lines), len(right_lines))
-    left_padded = left_lines + [""] * (max_lines - len(left_lines))
-    right_padded = right_lines + [""] * (max_lines - len(right_lines))
-
-    out = []
-    for i, (l, r) in enumerate(zip(left_padded, right_padded)):
-        out.append(f"│ {l:<{hw-3}}││ {r:<{hw-3}}│")
-    return out
-
-def box_top(name, w):
-    return f"╭─ {name} {'─' * max(0, w - len(name) - 4)}╮"
-
-def box_bot(w):
-    return f"╰{'─' * w}╯"
-
-
-# ═══════════════════════════════════════════════════════════
 #  DASHBOARD
 # ═══════════════════════════════════════════════════════════
 
@@ -170,138 +133,113 @@ class Dashboard:
         self.running = True
         self.proc = None
         self.data = Data()
-        self.logs = deque(maxlen=20)
+        self.srv_logs = deque(maxlen=20)
         self.t0 = time.time()
 
     def draw(self, W):
-        hw = (W - 4) // 2  # half width for each box in a pair
+        hw = W // 2  # half width for each column
 
         cpu = self.data.cpu()
         ru, rt, rpct = self.data.ram()
         gpus = self.data.gpu()
         (fl_ok, fl_s), (glm_ok, glm_s) = self.data.models()
-        tot, hr, err, last, top = self.data.stats()
+        tot, hrs, err, last, top = self.data.stats()
         running = self.proc and self.proc.poll() is None
 
         el = int(time.time() - self.t0)
         eh, er = divmod(el, 3600)
         em, es = divmod(er, 60)
 
-        L = []  # lines
+        out = []
 
-        # ── HEADER ──
-        L.append(f"{T.GOLD}{T.BOLD}  ╦═╗╔═╗╔╗ ╦  ╔═╗╔═╗╔═╗╔╦╗  ╔═╗╔═╗╔═╗╔╦╗╦ ╦╦═╗╔╦╗{T.RST}")
-        L.append(f"{T.GOLD}{T.BOLD}  ╠╦╝║╣ ╠╩╗║  ╠═╣║ ╦╚═╗ ║   ╠═╣║ ╦╚═╗ ║ ║ ║╠╦╝ ║ {T.RST}")
-        L.append(f"{T.GOLD}{T.BOLD}  ╩╚═╚═╝╚═╝╩═╝╩ ╩╚═╝╚═╝ ╩   ╩ ╩╚═╝╚═╝ ╩ ╚═╝╩╚═ ╩ {T.RST}")
-        L.append(f"{T.CYAN}  Ui:{eh:02d}:{em:02d}:{es:02d}  Florence-2 + GLM-OCR (Z.AI){T.RST}")
-        L.append(f"{T.GOLD}{'═' * (W-1)}{T.RST}")
-        L.append("")
+        # ── HEADER (simple, no fancy unicode) ──
+        out.append(f"{GLD}{B}  UI Agent MCP Dashboard{R}")
+        out.append(f"{CYN}  Florence-2 + GLM-OCR (Z.AI){R}  {D}Uptime: {eh:02d}:{em:02d}:{es:02d}{R}")
+        out.append(f"{GLD}{'═' * W}{R}")
+        out.append("")
 
-        # ── Row 1: CPU + RAM ──
-        cpu_lines = [
-            box_top("CPU", hw),
-            bline("Use", cpu, hw - 12),
-            f"  {T.DIM}Hist{T.RST} {spark(self.data.cpu_hist, hw - 14)}",
-            f"  {T.DIM}User:{sh(\"top -bn1 | awk '/Cpu/{print $2}'\")}%  Sys:{sh(\"top -bn1 | awk '/Cpu/{print $4}'\")}%{T.RST}",
-            box_bot(hw),
-        ]
-        ram_lines = [
-            box_top("MEMORY", hw),
-            bline("Use", rpct, hw - 12),
-            f"  {ru}/{rt}",
-            f"  {T.DIM}Hist{T.RST} {spark(self.data.ram_hist, hw - 14)}",
-            box_bot(hw),
-        ]
-        L.append(f"╭{'─' * hw}╮╭{'─' * hw}╮")
-        for row in zip(cpu_lines, ram_lines):
-            L.append(f"│ {row[0]:<{hw-3}}││ {row[1]:<{hw-3}}│")
-        L.append(f"╰{'─' * hw}╯╰{'─' * hw}╯")
-        L.append("")
+        # ── ROW 1: CPU | MEMORY ──
+        out.append(f"{'╭─ CPU ─' + '─' * (hw - 8)}╮{'╭─ MEMORY ─' + '─' * (hw - 11)}╮")
+        out.append(sep_line(f"  Use {bar(cpu, hw - 18)}", f"  Use {bar(rpct, hw - 18)}", W))
+        out.append(sep_line(f"  Hist {spark(self.data.cpu_h, hw - 16)}", f"  {ru}/{rt}", W))
+        out.append(sep_line(f"  {D}Cpu{R}", f"  Hist {spark(self.data.ram_h, hw - 16)}", W))
+        out.append(f"{'╰' + '─' * (hw - 1)}╯{'╰' + '─' * (hw - 1)}╯")
+        out.append("")
 
-        # ── Row 2: GPU + Models ──
-        gpu_lines = [box_top("GPU", hw)]
+        # ── ROW 2: GPU | MODELS ──
         if gpus:
-            for g in gpus:
-                name = g['name'][:hw - 10]
-                gpu_lines.append(f"  {T.GREEN}{name}{T.RST}")
-                gpu_lines.append(bline("Use", g['util'], hw - 12))
-                tc = T.RED if g['temp'] > 70 else T.WHITE
-                gpu_lines.append(f"  Mem: {T.CYAN}{g['mu']}/{g['mt']}{T.RST}  Temp: {tc}{g['temp']:.0f}°C{T.RST}")
+            g = gpus[0]
+            g1 = f"  {GRN}{g['name'][:hw-12]}{R}"
+            g2 = f"  Use {bar(g['util'], hw - 18)}"
+            tc = RED if g['temp'] > 70 else WHT
+            g3 = f"  Mem: {CYN}{g['mu']}/{g['mt']}{R}  {tc}{g['temp']:.0f}°C{R}"
         else:
-            gpu_lines.append(f"  {T.DIM}No GPU detected{T.RST}")
-            gpu_lines.append(f"  {T.DIM}—{T.RST}")
-            gpu_lines.append(f"  {T.DIM}—{T.RST}")
-        gpu_lines.append(box_bot(hw))
+            g1 = f"  {D}No GPU detected{R}"
+            g2 = f"  {D}—{R}"
+            g3 = f"  {D}—{R}"
 
-        model_lines = [
-            box_top("AI MODELS", hw),
-            f"  Florence-2  {T.GREEN}●{T.RST} Ready ({fl_s})" if fl_ok else f"  Florence-2  {T.RED}○{T.RST} Missing",
-            f"  GLM-OCR     {T.GREEN}●{T.RST} Ready ({glm_s})" if glm_ok else f"  GLM-OCR     {T.RED}○{T.RST} Missing",
-            f"  {T.DIM}Device: {'GPU' if gpus else 'CPU'}{T.RST}",
-            box_bot(hw),
-        ]
+        m1 = f"  Florence-2  {GRN}●{R} Ready ({fl_s})" if fl_ok else f"  Florence-2  {RED}○{R} Missing"
+        m2 = f"  GLM-OCR     {GRN}●{R} Ready ({glm_s})" if glm_ok else f"  GLM-OCR     {RED}○{R} Missing"
+        m3 = f"  {D}Device: {'GPU' if gpus else 'CPU'}{R}"
 
-        # Pad to same height
-        max_h = max(len(gpu_lines), len(model_lines))
-        gpu_lines += [""] * (max_h - len(gpu_lines))
-        model_lines += [""] * (max_h - len(model_lines))
+        out.append(f"{'╭─ GPU ─' + '─' * (hw - 8)}╮{'╭─ AI MODELS ─' + '─' * (hw - 13)}╮")
+        out.append(sep_line(g1, m1, W))
+        out.append(sep_line(g2, m2, W))
+        out.append(sep_line(g3, m3, W))
+        out.append(f"{'╰' + '─' * (hw - 1)}╯{'╰' + '─' * (hw - 1)}╯")
+        out.append("")
 
-        L.append(f"╭{'─' * hw}╮╭{'─' * hw}╮")
-        for g, m in zip(gpu_lines, model_lines):
-            L.append(f"│ {g:<{hw-3}}││ {m:<{hw-3}}│")
-        L.append(f"╰{'─' * hw}╯╰{'─' * hw}╯")
-        L.append("")
+        # ── ROW 3: STATS | TOP ACTIONS ──
+        s1 = f"  {B}Total:{R} {tot}  {CYN}Hr:{R} {hrs}  {RED if err else GRN}Err:{R} {err}"
+        s2 = f"  {D}Last: {last}{R}"
+        s3 = ""
+        s4 = ""
 
-        # ── Row 3: Stats + Top Actions ──
-        stat_lines = [
-            box_top("STATISTICS", hw),
-            f"  {T.BOLD}Total:{T.RST} {tot}  {T.CYAN}Hr:{T.RST} {hr}  {T.RED if err else T.GREEN}Err:{T.RST} {err}",
-            f"  {T.DIM}Last: {last}{T.RST}",
-            "",
-            box_bot(hw),
-        ]
-        top_lines = [box_top("TOP ACTIONS", hw)]
-        if top:
-            for name, cnt in top[:4]:
-                dots = max(1, hw - len(name) - len(str(cnt)) - 12)
-                top_lines.append(f"  {T.CYAN}{name}{T.RST} {'·' * dots} {T.BOLD}{cnt}{T.RST}")
-        else:
-            top_lines.append(f"  {T.DIM}No actions yet{T.RST}")
-            top_lines.append("")
-        top_lines.append(box_bot(hw))
+        out.append(f"{'╭─ STATISTICS ─' + '─' * (hw - 14)}╮{'╭─ TOP ACTIONS ─' + '─' * (hw - 15)}╮")
+        out.append(sep_line(s1, top[0][0] + f"  {B}{top[0][1]}{R}" if top else "No actions", W))
 
-        max_h = max(len(stat_lines), len(top_lines))
-        stat_lines += [""] * (max_h - len(stat_lines))
-        top_lines += [""] * (max_h - len(top_lines))
+        t2 = f"{D}·{R} ".join(f"{CYN}{n}{R} {B}{c}{R}" for n, c in top[1:3]) if len(top) > 1 else ""
+        out.append(sep_line(s2, t2[:hw-6], W))
 
-        L.append(f"╭{'─' * hw}╮╭{'─' * hw}╮")
-        for s, t in zip(stat_lines, top_lines):
-            L.append(f"│ {s:<{hw-3}}││ {t:<{hw-3}}│")
-        L.append(f"╰{'─' * hw}╯╰{'─' * hw}╯")
-        L.append("")
+        t3 = f"{D}·{R} ".join(f"{CYN}{n}{R} {B}{c}{R}" for n, c in top[3:5]) if len(top) > 3 else ""
+        out.append(sep_line(s3, t3[:hw-6], W))
+        out.append(sep_line(s4, "", W))
+        out.append(f"{'╰' + '─' * (hw - 1)}╯{'╰' + '─' * (hw - 1)}╯")
+        out.append("")
 
-        # ── Row 4: Server Log (full width) ──
-        log_w = W - 4
-        L.append(box_top("SERVER LOG", log_w))
-        log_list = list(self.logs)[-6:]
-        for i in range(6):
-            if i < len(log_list):
-                ln = log_list[i][:log_w - 4]
-                L.append(f"│ {T.DIM}{ln}{T.RST}{' ' * max(0, log_w - 3 - len(ln))}│")
-            else:
-                L.append(f"│{' ' * (log_w - 1)}│")
-        L.append(box_bot(log_w))
-        L.append("")
+        # ── ROW 4: CONTROLS | SERVER LOG ──
+        out.append(f"{'╭─ CONTROLS ─' + '─' * (hw - 13)}╮{'╭─ SERVER LOG ─' + '─' * (hw - 14)}╮")
+        out.append(sep_line(f"  {B}s{R} Start Server", "", W))
+
+        log_list = list(self.srv_logs)[-5:]
+        for i, line in enumerate(log_list):
+            ln = line[:hw - 8]
+            out.append(sep_line(
+                f"  {B}x{R} Stop Server" if i == 0 else "",
+                f"{D}{ln}{R}",
+                W
+            ))
+
+        # Pad remaining log lines
+        for i in range(max(0, 4 - len(log_list))):
+            out.append(sep_line(
+                f"  {B}h{R} Health Check" if i == 0 else (f"  {B}d{R} Download" if i == 1 else ""),
+                "",
+                W
+            ))
+
+        out.append(f"{'╰' + '─' * (hw - 1)}╯{'╰' + '─' * (hw - 1)}╯")
+        out.append("")
 
         # ── STATUS BAR ──
-        sc = f"{T.GREEN}● RUNNING{T.RST}" if running else f"{T.DIM}○ STOPPED{T.RST}"
-        L.append(f"{T.GOLD}{'═' * (W-1)}{T.RST}")
-        L.append(f"{sc}  {T.DIM}q:quit  r:refresh  s:start  x:stop  h:health  d:download{T.RST}  {T.CYAN}{last}{T.RST}")
+        sc = f"{GRN}● RUNNING{R}" if running else f"{D}○ STOPPED{R}"
+        out.append(f"{GLD}{'═' * W}{R}")
+        out.append(f"{sc}  {D}q:quit  r:refresh  s:start  x:stop  h:health  d:download{R}  {CYN}{last}{R}")
 
-        return "\n".join(L)
+        return "\n".join(out)
 
     def start(self):
-        self.logs.append(f"[{datetime.now():%H:%M:%S}] Starting MCP server...")
+        self.srv_logs.append(f"[{datetime.now():%H:%M:%S}] Starting...")
         def t():
             proc = subprocess.Popen(
                 ["bash", "-c", f"cd {BASE} && source .venv/bin/activate && python server.py"],
@@ -310,12 +248,18 @@ class Dashboard:
             self.proc = proc
             for ln in iter(proc.stdout.readline, ''):
                 if ln and ln.strip():
-                    self.logs.append(f"[{datetime.now():%H:%M:%S}] {ln.rstrip()}")
+                    self.srv_logs.append(f"[{datetime.now():%H:%M:%S}] {ln.rstrip()[:60]}")
         threading.Thread(target=t, daemon=True).start()
 
     def stop(self):
         sh("pkill -f 'python server.py' || true")
-        self.logs.append(f"[{datetime.now():%H:%M:%S}] Stopped")
+        self.srv_logs.append(f"[{datetime.now():%H:%M:%S}] Stopped")
+
+    def render(self):
+        W = shutil.get_terminal_size((80, 40)).columns
+        H = shutil.get_terminal_size((80, 40)).lines
+        sys.stdout.write(HM + CL + self.draw(W))
+        sys.stdout.flush()
 
     def run(self):
         fd = sys.stdin.fileno()
@@ -329,7 +273,7 @@ class Dashboard:
         except: pass
 
         def cleanup():
-            sys.stdout.write(T.SHOW + T.HOME + T.CLR)
+            sys.stdout.write(SH + HM + CL + R)
             sys.stdout.flush()
             if old:
                 try:
@@ -337,13 +281,14 @@ class Dashboard:
                     termios.tcsetattr(fd, termios.TCSANOW, old)
                 except: pass
 
-        sys.stdout.write(T.CLR + T.HOME + T.HIDE)
+        sys.stdout.write(CL)
         sys.stdout.flush()
 
         def refresher():
             while self.running:
                 time.sleep(2)
-                self.render()
+                try: self.render()
+                except: pass
         threading.Thread(target=refresher, daemon=True).start()
         self.render()
 
@@ -353,14 +298,14 @@ class Dashboard:
                     ch = sys.stdin.read(1)
                     if ch == 'q': break
                     elif ch == 'r': self.render()
-                    elif ch == 's': self.start(); time.sleep(0.3); self.render()
-                    elif ch == 'x': self.stop(); time.sleep(0.3); self.render()
+                    elif ch == 's': self.start(); time.sleep(0.5); self.render()
+                    elif ch == 'x': self.stop(); time.sleep(0.5); self.render()
                     elif ch == 'h':
-                        self.logs.append(f"[{datetime.now():%H:%M:%S}] Health check...")
+                        self.srv_logs.append(f"[{datetime.now():%H:%M:%S}] Health check...")
                         self.render()
-                        threading.Thread(target=lambda: sh(f"cd {BASE} && bash scripts/health_check.sh"), daemon=True).start()
+                        threading.Thread(target=lambda: sh(f"cd {BASE} && bash scripts/health_check.sh 2>&1 | tail -5"), daemon=True).start()
                     elif ch == 'd':
-                        self.logs.append(f"[{datetime.now():%H:%M:%S}] Downloading models...")
+                        self.srv_logs.append(f"[{datetime.now():%H:%M:%S}] Downloading models...")
                         self.render()
                         threading.Thread(target=lambda: sh(f"cd {BASE} && source .venv/bin/activate && python scripts/download_models.sh"), daemon=True).start()
         except KeyboardInterrupt: pass
@@ -368,12 +313,7 @@ class Dashboard:
             self.running = False
             if self.proc: self.proc.terminate()
             cleanup()
-            print(f"\n{T.GREEN}Dashboard closed{T.RST}\n")
-
-    def render(self):
-        W = shutil.get_terminal_size((80, 40)).columns
-        sys.stdout.write(T.HOME + self.draw(W) + T.RST)
-        sys.stdout.flush()
+            print(f"\n{GRN}Dashboard closed{R}\n")
 
 
 if __name__ == "__main__":
