@@ -1,85 +1,124 @@
 #!/usr/bin/env python3
 """
-UI Agent MCP — TUI Dashboard v2
-Beautiful, interactive terminal UI with live monitoring.
+UI Agent MCP — Btop-Style TUI Dashboard
+Clean, colorful, box-drawn terminal UI with live monitoring.
 """
 
-import os, sys, time, json, subprocess, threading, shutil
+import time, json, subprocess, threading, shutil
 from pathlib import Path
-from datetime import datetime
 from collections import deque
 
 import pytermgui as ptg
 
-# ──── Paths ────
 BASE = Path(__file__).parent
-ENV = BASE / ".env"
 LOG = BASE / "logs" / "actions.jsonl"
 
-# ──── Theme ────
-C = {
-    "gold": "bold gold1",
-    "blue": "bold deep_sky_blue1",
-    "green": "bold lime_green",
-    "red": "bold red",
-    "pink": "bold hot_pink",
-    "cyan": "bold cyan",
-    "dim": "dim",
-    "white": "bold white",
-}
-
-# ──── Helpers ────
-def sh(cmd, timeout=10):
+def sh(c, t=10):
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=t)
         return (r.stdout or r.stderr).strip()
     except: return ""
 
-def gpu_info():
+def term_width():
+    return shutil.get_terminal_size((80, 24)).columns
+
+# ═══════ COLORS ═══════
+W  = "bold white"
+G  = "bold lime_green"     # good/green
+Y  = "bold gold1"          # warning/yellow
+R  = "bold red"            # bad/red
+CY = "bold deep_sky_blue1" # info/cyan
+PK = "bold hot_pink"       # accent
+DM = "dim"                 # muted
+GL = "bold green"          # GPU green
+OR = "bold orange1"        # mid/warning
+
+def bar(pct, width=20):
+    """Render a colored bar like btop."""
+    filled = int(pct / 100 * width)
+    if pct > 80:   c = R
+    elif pct > 60: c = OR
+    elif pct > 40: c = Y
+    else:          c = G
+    return f"[{c}]{'█' * filled}{'░' * (width - filled)}[/] [{W}]{pct:3.0f}%[/]"
+
+def mini_bar(pct, width=10):
+    filled = int(pct / 100 * width)
+    if pct > 80:   c = R
+    elif pct > 60: c = OR
+    elif pct > 40: c = Y
+    else:          c = G
+    return f"[{c}]{'█' * filled}{'░' * (width - filled)}[/]"
+
+
+# ═══════ DATA FETCHERS ═══════
+
+def get_gpu():
     o = sh("nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null")
     if o and "fail" not in o.lower():
         p = o.split(", ")
         if len(p) >= 5:
-            return {"ok": True, "name": p[0], "used": p[1], "total": p[2], "util": p[3], "temp": p[4]}
-    return {"ok": False, "name": "N/A", "used": "0", "total": "0", "util": "0", "temp": "0"}
+            try:
+                util = float(p[3].replace("%",""))
+                temp = float(p[4])
+                return {"ok": True, "name": p[0], "mem": p[1], "mem_total": p[2], "util": util, "temp": temp}
+            except: pass
+    return {"ok": False, "name": "N/A", "mem": "0", "mem_total": "0", "util": 0, "temp": 0}
 
-def model_status():
+def get_cpu():
+    o = sh("top -bn1 | grep 'Cpu(s)' | awk '{print 100 - $8}'")
+    try: return float(o)
+    except: return 0.0
+
+def get_ram():
+    o = sh("free -b | awk '/Mem:/{print $3, $2, $3/$2*100}'")
+    parts = o.split()
+    if len(parts) >= 3:
+        used = int(parts[0])
+        total = int(parts[1])
+        pct = float(parts[2])
+        def fmt(b):
+            if b < 1024**3: return f"{b/1024**2:.0f}MiB"
+            return f"{b/1024**3:.1f}GiB"
+        return {"used": fmt(used), "total": fmt(total), "pct": pct}
+    return {"used": "0", "total": "0", "pct": 0}
+
+def get_models():
     m = BASE / "models"
-    def info(name, path):
-        p = path / name
+    def chk(name):
+        p = m / name
         if p.exists():
-            sz = sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) / (1024**3)
-            return True, f"{sz:.1f}GB"
-        return False, "0GB"
-    fl = info("Florence-2-base", m)
-    glm = info("GLM-OCR", m)
-    return {"florence": {"ok": fl[0], "size": fl[1]}, "glm": {"ok": glm[0], "size": glm[1]}}
+            sz = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            if sz > 1024**3: return True, f"{sz/1024**3:.1f}GB"
+            return True, f"{sz/1024**2:.0f}MB"
+        return False, "—"
+    return chk("Florence-2-base"), chk("GLM-OCR")
 
-def action_stats():
+def get_stats():
     if not LOG.exists():
-        return {"total": 0, "hr": 0, "err": 0, "last": "Never", "top_actions": []}
+        return 0, 0, 0, "Never", []
     lines = LOG.read_text().strip().split("\n") if LOG.read_text().strip() else []
     total = len(lines)
     errors = 0
     actions = {}
     one_hr = time.time() - 3600
-    hr_count = 0
+    hr = 0
     for l in lines:
         try:
             e = json.loads(l)
             if e.get("status") == "error": errors += 1
             a = e.get("action", "?")
             actions[a] = actions.get(a, 0) + 1
-            if e.get("timestamp", 0) > one_hr: hr_count += 1
+            if e.get("timestamp", 0) > one_hr: hr += 1
         except: pass
-    top = sorted(actions.items(), key=lambda x: -x[1])[:5]
     last = "Never"
     if lines:
-        try: last = json.loads(lines[-1]).get("time_iso", "?")
+        try: last = json.loads(lines[-1]).get("time_iso", "?")[:19]
         except: pass
-    return {"total": total, "hr": hr_count, "err": errors, "last": last, "top_actions": top}
+    top = sorted(actions.items(), key=lambda x: -x[1])[:6]
+    return total, hr, errors, last, top
 
-def recent_logs(n=8):
+def get_logs(n=6):
     if not LOG.exists(): return []
     lines = LOG.read_text().strip().split("\n") if LOG.read_text().strip() else []
     out = []
@@ -88,276 +127,223 @@ def recent_logs(n=8):
         except: pass
     return list(reversed(out))
 
-def sys_info():
-    """Get system information."""
-    cpu = sh("top -bn1 | grep 'Cpu(s)' | awk '{print $2}'") or "0"
-    ram = sh("free -h | awk '/Mem:/{print $3 \"/\" $2}'") or "N/A"
-    uptime = sh("uptime -p") or "N/A"
-    return {"cpu": f"{float(cpu):.1f}%" if cpu.replace('.','').isdigit() else "0%", "ram": ram, "uptime": uptime}
-
 
 # ═══════════════════════════════════════════════════════════
-#  PROGRESS BAR HELPER
-# ═══════════════════════════════════════════════════════════
-def progress_bar(pct, width=20, fill_char="█", empty_char="░"):
-    filled = int(pct / 100 * width)
-    bar = fill_char * filled + empty_char * (width - filled)
-    if pct > 75: color = "lime_green"
-    elif pct > 50: color = "gold1"
-    elif pct > 25: color = "orange1"
-    else: color = "red"
-    return f"[{color}]{bar}[/] {pct:.0f}%"
-
-
-# ═══════════════════════════════════════════════════════════
-#  DASHBOARD v2
+#  BTOP-STYLE DASHBOARD
 # ═══════════════════════════════════════════════════════════
 
-def build_dashboard():
-    """Main dashboard builder."""
+def main():
+    state = {"running": True, "proc": None, "log_lines": deque(maxlen=60)}
 
-    # ── Shared state ──
-    state = {
-        "server_proc": None,
-        "server_running": False,
-        "logs": deque(maxlen=100),
-        "status": "[dim]Ready[/]",
-        "log_refresh": True,
-    }
+    def quit_fn():
+        state["running"] = False
+        if state["proc"]:
+            state["proc"].terminate()
+        mgr.stop()
 
-    # ── Status labels (will be updated live) ──
-    gpu_lb = ptg.Label("")
-    model_lb = ptg.Label("")
-    sys_lb = ptg.Label("")
-    action_lb = ptg.Label("")
-    status_lb = ptg.Label("[dim]Ready[/]")
-    log_lb = ptg.Label("")
-    log_scroll = [0]
-
-    # ── Update functions ──
-    def update_gpu():
-        g = gpu_info()
-        if g["ok"]:
-            bar = progress_bar(float(g["util"].replace("%","")))
-            gpu_lb.value = (
-                f"[{C['green']}]● GPU: {g['name']}[/]\n"
-                f"  Util: {bar}\n"
-                f"  Mem: {g['used']}/{g['total']}  Temp: {g['temp']}°C"
-            )
-        else:
-            gpu_lb.value = f"[{C['dim']}]○ No GPU detected[/]\n  Using CPU mode"
-
-    def update_models():
-        m = model_status()
-        f = m["florence"]
-        g = m["glm"]
-        fi = f"[{C['green']}]✓" if f["ok"] else f"[{C['red']}]✗"
-        gi = f"[{C['green']}]✓" if g["ok"] else f"[{C['red']}]✗"
-        model_lb.value = (
-            f"{fi} Florence-2: {'Ready' if f['ok'] else 'Download'} ({f['size']})[/]\n"
-            f"{gi} GLM-OCR: {'Ready' if g['ok'] else 'Download'} ({g['size']})[/]"
-        )
-
-    def update_sys():
-        s = sys_info()
-        cpu_bar = progress_bar(float(s["cpu"].replace("%","")))
-        sys_lb.value = (
-            f"CPU: {cpu_bar}\n"
-            f"RAM: {s['ram']}\n"
-            f"Up: {s['uptime']}"
-        )
-
-    def update_actions():
-        a = action_stats()
-        top3 = "\n".join(f"  {name}: {cnt}" for name, cnt in a["top_actions"][:3]) or "  No actions yet"
-        action_lb.value = (
-            f"Total: {a['total']} | Hour: {a['hr']} | Err: {a['err']}\n"
-            f"Last: {a['last'][:19] if a['last'] != 'Never' else 'Never'}\n"
-            f"Top:\n{top3}"
-        )
-
-    def update_log_display():
-        logs = recent_logs(10)
-        if not logs:
-            log_lb.value = "[dim]No actions logged yet[/]"
-            return
-        lines = []
-        for l in logs:
-            t = l.get("time_iso", "?")[:19]
-            a = l.get("action", "?")
-            s = l.get("status", "?")
-            icon = f"[{C['green']}]✓" if s == "ok" else f"[{C['red']}]✗"
-            lines.append(f"{icon} {t[11:]} {a}[/]")
-        log_lb.value = "\n".join(lines)
-
-    def full_refresh():
-        update_gpu()
-        update_models()
-        update_sys()
-        update_actions()
-        update_log_display()
-
-    # ── Background updater ──
-    def bg_updater():
-        while state["log_refresh"]:
-            time.sleep(3)
-            try:
-                full_refresh()
-            except: pass
-
-    threading.Thread(target=bg_updater, daemon=True).start()
-
-    # ── Actions ──
-    def do_health():
-        status_lb.value = f"[{C['gold']}]Running health check...[/]"
-        def t():
-            sh(f"cd {BASE} && bash scripts/health_check.sh")
-            status_lb.value = f"[{C['green']}]Health check complete ✓[/]"
-            full_refresh()
-        threading.Thread(target=t, daemon=True).start()
-
-    def do_start():
-        status_lb.value = f"[{C['gold']}]Starting MCP server...[/]"
+    def start_fn():
+        log_box.value = f"[{DM}]Starting...[/]\n"
         def t():
             proc = subprocess.Popen(
                 ["bash", "-c", f"cd {BASE} && source .venv/bin/activate && python server.py"],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
             )
-            state["server_proc"] = proc
-            state["server_running"] = True
-            status_lb.value = f"[{C['green']}]● MCP Server Running[/]"
+            state["proc"] = proc
             for ln in iter(proc.stdout.readline, ''):
                 if ln:
-                    state["logs"].append(ln.rstrip())
-                    if len(state["logs"]) > 50:
-                        state["logs"].popleft()
-                    log_lb.value = "\n".join(f"[dim]{l}[/]" for l in list(state["logs"])[-15:])
+                    state["log_lines"].append(ln.rstrip())
+                    log_box.value = "\n".join(f"[{DM}]{l}[/]" for l in list(state["log_lines"])[-20:])
         threading.Thread(target=t, daemon=True).start()
 
-    def do_stop():
+    def stop_fn():
         sh("pkill -f 'python server.py' || true")
-        state["server_running"] = False
-        status_lb.value = f"[{C['dim']}]● Server Stopped[/]"
 
-    def do_download():
-        status_lb.value = f"[{C['gold']}]Downloading models (~2.3GB, this takes a while)...[/]"
+    def health_fn():
         def t():
-            sh(f"cd {BASE} && source .venv/bin/activate && python scripts/download_models.sh")
-            status_lb.value = f"[{C['green']}]Models downloaded ✓[/]"
-            full_refresh()
+            sh(f"cd {BASE} && bash scripts/health_check.sh 2>&1")
         threading.Thread(target=t, daemon=True).start()
 
-    def do_logs():
-        update_log_display()
-        status_lb.value = f"[{C['cyan']}]Logs refreshed[/]"
+    def dl_fn():
+        def t():
+            sh(f"cd {BASE} && source .venv/bin/activate && python scripts/download_models.sh 2>&1")
+        threading.Thread(target=t, daemon=True).start()
 
-    def do_clear_logs():
-        state["logs"].clear()
-        log_lb.value = f"[dim]Logs cleared[/]"
+    # ── Live labels ──
+    cpu_label = ptg.Label("")
+    ram_label = ptg.Label("")
+    gpu_label = ptg.Label("")
+    temp_label = ptg.Label("")
+    model_label = ptg.Label("")
+    stats_label = ptg.Label("")
+    top_label = ptg.Label("")
+    log_box = ptg.Label(f"[{DM}]Waiting for server...[/]")
+    status_bar = ptg.Label(f"[{DM}]q:quit  r:refresh  s:start  x:stop[/]")
+    uptime_lb = ptg.Label("")
 
-    # ── Create windows ──
-    windows = []
+    t0 = time.time()
 
-    # 1. Header
-    windows.append(ptg.Window(
-        f"[{C['gold']}]╔══════════════════════════════════════════════════╗[/]",
-        f"[{C['gold']}]║   🖥️  UI Agent MCP — Dashboard v2                ║[/]",
-        f"[{C['gold']}]║   Florence-2 + GLM-OCR (Z.AI) • PyTermGUI       ║[/]",
-        f"[{C['gold']}]╚══════════════════════════════════════════════════╝[/]",
-        box="EMPTY",
-    ))
+    def refresh():
+        elapsed = int(time.time() - t0)
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+        uptime_lb.value = f"[{CY}]Ui:{h:02d}:{m:02d}:{s:02d}[/]"
 
-    # 2. GPU & System
-    windows.append(ptg.Window(
-        f"[{C['blue']}]━━━ Hardware ━━━[/]",
-        gpu_lb,
-        "",
-        f"[{C['cyan']}]━━━ System ━━━[/]",
-        sys_lb,
-        box="DOUBLE",
-        width=50,
-    ))
+        # CPU
+        cpu = get_cpu()
+        cpu_label.value = f"  {bar(cpu, 30)}"
+        ram_label.value = f"  {bar(get_ram()['pct'], 30)}"
 
-    # 3. Models
-    windows.append(ptg.Window(
-        f"[{C['pink']}]━━━ AI Models ━━━[/]",
-        model_lb,
-        "",
-        ptg.Button("📥 Download Models", on_click=lambda _: do_download()),
-        box="DOUBLE",
-        width=50,
-    ))
+        # RAM detail
+        r = get_ram()
+        ram_label.value = f"  {bar(r['pct'], 22)}  [{W}]{r['used']}/{r['total']}[/]"
 
-    # 4. Action Stats
-    windows.append(ptg.Window(
-        f"[{C['green']}]━━━ Action Statistics ━━━[/]",
-        action_lb,
-        box="DOUBLE",
-        width=50,
-    ))
+        # GPU
+        g = get_gpu()
+        if g["ok"]:
+            gpu_label.value = f"  [{GL}]{g['name']}[/]"
+            temp_c = g['temp']
+            temp_label.value = (
+                f"  Util  {bar(g['util'], 22)}\n"
+                f"  Mem   [{CY}]{g['mem']}/{g['mem_total']}[/]\n"
+                f"  Temp  [{Y if temp_c > 70 else W}]{temp_c:.0f}°C[/]  {mini_bar(min(temp_c, 100), 10)}"
+            )
+        else:
+            gpu_label.value = f"  [{DM}]No GPU[/]"
+            temp_label.value = f"  [{DM}]—[/]"
 
-    # 5. Controls
-    windows.append(ptg.Window(
-        f"[{C['gold']}]━━━ Server Controls ━━━[/]",
-        "",
-        ptg.Button("▶  Start Server", on_click=lambda _: do_start()),
-        ptg.Button("⏹  Stop Server", on_click=lambda _: do_stop()),
-        ptg.Button("🔍 Health Check", on_click=lambda _: do_health()),
-        ptg.Button("📋 Refresh Logs", on_click=lambda _: do_logs()),
-        ptg.Button("🗑  Clear Log View", on_click=lambda _: do_clear_logs()),
-        "",
-        status_lb,
-        box="DOUBLE",
-        width=50,
-    ))
+        # Models
+        (fl_ok, fl_s), (glm_ok, glm_s) = get_models()
+        fi = f"[{G}]●[/] Ready ({fl_s})" if fl_ok else f"[{R}]○[/] Missing"
+        gi = f"[{G}]●[/] Ready ({glm_s})" if glm_ok else f"[{R}]○[/] Missing"
+        model_label.value = f"  Florence-2  {fi}\n  GLM-OCR     {gi}"
 
-    # 6. Live Server Log
-    windows.append(ptg.Window(
-        f"[{C['green']}]━━━ Live Server Log ━━━[/]",
-        log_lb,
-        box="DOUBLE",
-    ))
+        # Stats
+        tot, hr, err, last, top = get_stats()
+        stats_label.value = (
+            f"  [{W}]Total:[/] {tot}  [{CY}]Hr:[/] {hr}  "
+            f"[{R if err else G}]Err:[/] {err}\n"
+            f"  [{DM}]Last:[/] {last}"
+        )
 
-    # ── Build layout ──
-    mgr = ptg.WindowManager()
+        # Top actions
+        if top:
+            lines = []
+            for name, cnt in top[:5]:
+                lines.append(f"  [{CY}]{name:20s}[/] [{W}]{cnt}[/]")
+            top_label.value = "\n".join(lines)
+        else:
+            top_label.value = f"  [{DM}]No actions yet[/]"
 
-    # Header (full width)
-    mgr.add(windows[0])
+    # ── Background refresher ──
+    def refresher():
+        while state["running"]:
+            try: refresh()
+            except: pass
+            time.sleep(2)
+    threading.Thread(target=refresher, daemon=True).start()
 
-    # Two-column rows
-    row1 = ptg.Splitter(windows[1], windows[2])
-    row2 = ptg.Splitter(windows[3], windows[4])
-    mgr.add(row1)
-    mgr.add(row2)
+    # ── BUILD UI ──
+    with ptg.WindowManager() as mgr:
+        # Title
+        mgr.add(ptg.Window(
+            f"[{Y}]   ╦ ╦╔═╗╔╗   ╔═╗╔═╗╔═╗╔╦╗╦ ╦╦═╗╔╦╗   ╔╦╗╔═╗╔╗╔╦╔╦╗╔═╗╦═╗  ══[/]",
+            f"[{Y}]   ║║║║╣ ╠╩╗  ╠═╣║ ╦╚═╗ ║ ║ ║╠╦╝ ║     ║ ║ ║║║║║ ║ ║╣ ╠╦╝[/]",
+            f"[{Y}]   ╚╩╝╚═╝╚═╝  ╩ ╩╚═╝╚═╝ ╩ ╚═╝╩╚═ ╩     ╩ ╚═╝╝╚╝╩ ╩ ╚═╝╩╚═[/]",
+            box="EMPTY",
+        ))
 
-    # Log panel (full width)
-    mgr.add(windows[5])
+        # ── Row 1: CPU + RAM ──
+        cpu_box = ptg.Window(
+            f"[{CY}]╭─ CPU ────────────────────────────╮[/]",
+            f"  [{W}]Processor Usage[/]",
+            cpu_label,
+            f"[{CY}]╰──────────────────────────────────╯[/]",
+            box="EMPTY",
+        )
 
-    # ── Keybindings ──
-    def quit_fn():
-        state["log_refresh"] = False
-        if state["server_proc"]:
-            state["server_proc"].terminate()
-        mgr.stop()
+        ram_box = ptg.Window(
+            f"[{CY}]╭─ MEMORY ─────────────────────────╮[/]",
+            f"  [{W}]RAM Usage[/]",
+            ram_label,
+            f"[{CY}]╰──────────────────────────────────╯[/]",
+            box="EMPTY",
+        )
 
-    mgr.bind("q", "Quit", quit_fn)
-    mgr.bind("r", "Refresh", lambda: full_refresh())
+        mgr.add(ptg.Splitter(cpu_box, ram_box))
 
-    # ── Initial data load ──
-    full_refresh()
+        # ── Row 2: GPU + Models ──
+        gpu_box = ptg.Window(
+            f"[{GL}]╭─ GPU ─────────────────────────────╮[/]",
+            gpu_label,
+            temp_label,
+            f"[{GL}]╰───────────────────────────────────╯[/]",
+            box="EMPTY",
+        )
 
-    return mgr
+        model_box = ptg.Window(
+            f"[{PK}]╭─ AI MODELS ─────────────────────╮[/]",
+            model_label,
+            f"",
+            f"[{PK}]╰────────────────────────────────╯[/]",
+            box="EMPTY",
+        )
 
+        mgr.add(ptg.Splitter(gpu_box, model_box))
 
-# ═══════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ═══════════════════════════════════════════════════════════
+        # ── Row 3: Stats + Actions ──
+        stats_box = ptg.Window(
+            f"[{Y}]╭─ STATISTICS ──────────────────────╮[/]",
+            stats_label,
+            f"[{Y}]╰───────────────────────────────────╯[/]",
+            box="EMPTY",
+        )
 
-def main():
-    print(f"\n🚀 Loading UI Agent MCP Dashboard v2...\n")
-    mgr = build_dashboard()
-    mgr.run()
-    print("\n👋 Dashboard closed\n")
+        top_box = ptg.Window(
+            f"[{PK}]╭─ TOP ACTIONS ────────────────────╮[/]",
+            top_label,
+            f"[{PK}]╰──────────────────────────────────╯[/]",
+            box="EMPTY",
+        )
+
+        mgr.add(ptg.Splitter(stats_box, top_box))
+
+        # ── Row 4: Controls + Logs ──
+        ctrl_box = ptg.Window(
+            f"[{G}]╭─ CONTROLS ──────────────────────╮[/]",
+            "",
+            f"  [{W}]s[/] Start Server",
+            f"  [{W}]x[/] Stop Server",
+            f"  [{W}]h[/] Health Check",
+            f"  [{W}]d[/] Download Models",
+            "",
+            f"[{G}]╰────────────────────────────────╯[/]",
+            box="EMPTY",
+        )
+
+        log_window = ptg.Window(
+            f"[{G}]╭─ SERVER LOG ──────────────────────────────────────╮[/]",
+            log_box,
+            f"[{G}]╰──────────────────────────────────────────────────╯[/]",
+            box="EMPTY",
+        )
+
+        mgr.add(ptg.Splitter(ctrl_box, log_window))
+
+        # ── Status bar ──
+        mgr.add(status_bar)
+
+        # ── Keybindings ──
+        mgr.bind("q", "Quit", quit_fn)
+        mgr.bind("r", "Refresh", refresh)
+        mgr.bind("s", "Start", lambda: start_fn())
+        mgr.bind("x", "Stop", lambda: stop_fn())
+        mgr.bind("h", "Health", lambda: health_fn())
+        mgr.bind("d", "Download", lambda: dl_fn())
+
+        refresh()
+        mgr.run()
+
+    print(f"\n[{G}]👋 Dashboard closed[{/}]\n")
 
 
 if __name__ == "__main__":
