@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 UI Agent MCP — Interactive TUI Dashboard
-Beautiful terminal UI for managing your UI Agent MCP server.
 """
 
 import os
@@ -11,336 +10,229 @@ import json
 import subprocess
 import threading
 from pathlib import Path
-from datetime import datetime
 
 import pytermgui as ptg
 
-# ──── Paths ────
 BASE_DIR = Path(__file__).parent
 ENV_FILE = BASE_DIR / ".env"
 LOG_FILE = BASE_DIR / "logs" / "actions.jsonl"
-STATE_FILE = BASE_DIR / ".install_state"
 
-# ──── Colors ────
-COLORS = {
-    "primary": "bold #FFCB47",      # Gold
-    "secondary": "bold #369EFF",    # Blue
-    "success": "bold #47FF87",      # Green
-    "danger": "bold #FF4757",       # Red
-    "muted": "dim #888888",         # Gray
-    "accent": "bold #FF6B9D",       # Pink
-    "white": "bold #FFFFFF",
-    "bg_dark": "#1A1A2E",
-    "bg_card": "#16213E",
-}
 
-# ──── Helpers ────
-
-def run_cmd(cmd: str, timeout: int = 10) -> str:
-    """Run shell command and return output."""
+def run_cmd(cmd, timeout=10):
     try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout
-        )
-        return result.stdout.strip() or result.stderr.strip()
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip() or r.stderr.strip()
     except Exception as e:
         return str(e)
 
-def check_gpu() -> dict:
-    """Check GPU status."""
-    output = run_cmd("nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null")
-    if output and "failed" not in output.lower():
-        parts = output.split(", ")
-        if len(parts) >= 4:
-            return {
-                "available": True,
-                "name": parts[0],
-                "memory": f"{parts[1]}/{parts[2]}",
-                "util": parts[3],
-            }
+def check_gpu():
+    out = run_cmd("nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null")
+    if out and "failed" not in out.lower():
+        p = out.split(", ")
+        if len(p) >= 4:
+            return {"available": True, "name": p[0], "memory": f"{p[1]}/{p[2]}", "util": p[3]}
     return {"available": False, "name": "None", "memory": "N/A", "util": "N/A"}
 
-def get_model_status() -> dict:
-    """Check which models are downloaded."""
-    models_dir = BASE_DIR / "models"
-    florence = models_dir / "Florence-2-base"
-    glm = models_dir / "GLM-OCR"
-
-    def size_mb(path):
-        if not path.exists():
-            return 0
-        total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-        return total / (1024 * 1024)
-
+def get_models():
+    mdir = BASE_DIR / "models"
+    def sz(p):
+        if not p.exists(): return "0MB"
+        t = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        return f"{t/(1024*1024):.0f}MB"
     return {
-        "florence": {"exists": florence.exists(), "size": f"{size_mb(florence):.0f}MB"},
-        "glm_ocr": {"exists": glm.exists(), "size": f"{size_mb(glm):.0f}MB"},
+        "florence": (mdir / "Florence-2-base").exists(),
+        "glm": (mdir / "GLM-OCR").exists(),
+        "florence_sz": sz(mdir / "Florence-2-base"),
+        "glm_sz": sz(mdir / "GLM-OCR"),
     }
 
-def get_action_stats() -> dict:
-    """Read action log for stats."""
+def get_stats():
     if not LOG_FILE.exists():
-        return {"total": 0, "last_hour": 0, "errors": 0, "last_action": "Never"}
-
+        return {"total": 0, "last_hour": 0, "errors": 0, "last": "Never"}
     lines = LOG_FILE.read_text().strip().split("\n") if LOG_FILE.read_text().strip() else []
-    total = len(lines)
-    errors = sum(1 for l in lines if '"error"' in l or '"status": "error"' in l)
-
-    one_hour_ago = time.time() - 3600
-    last_hour = 0
-    for l in lines:
-        try:
-            entry = json.loads(l)
-            if entry.get("timestamp", 0) > one_hour_ago:
-                last_hour += 1
-        except:
-            pass
-
-    last_action = "Never"
+    errors = sum(1 for l in lines if "error" in l.lower())
+    one_h = time.time() - 3600
+    lh = sum(1 for l in lines if try_json_ts(l) > one_h)
+    last = "Never"
     if lines:
-        try:
-            last = json.loads(lines[-1])
-            last_action = last.get("time_iso", "Unknown")
-        except:
-            last_action = "Unknown"
+        try: last = json.loads(lines[-1]).get("time_iso", "?")
+        except: pass
+    return {"total": len(lines), "last_hour": lh, "errors": errors, "last": last}
 
-    return {"total": total, "last_hour": last_hour, "errors": errors, "last_action": last_action}
+def try_json_ts(l):
+    try: return json.loads(l).get("timestamp", 0)
+    except: return 0
 
-def get_recent_logs(n: int = 10) -> list:
-    """Get recent log entries."""
-    if not LOG_FILE.exists():
-        return []
+def get_logs(n=8):
+    if not LOG_FILE.exists(): return []
     lines = LOG_FILE.read_text().strip().split("\n") if LOG_FILE.read_text().strip() else []
-    entries = []
+    out = []
     for l in lines[-n:]:
-        try:
-            entries.append(json.loads(l))
-        except:
-            pass
-    return list(reversed(entries))
+        try: out.append(json.loads(l))
+        except: pass
+    return list(reversed(out))
 
-
-# ════════════════════════════════════════════════════════════
-#  BUILD UI
-# ════════════════════════════════════════════════════════════
-
-def build_header() -> ptg.Container:
-    """Build animated header."""
-    return ptg.Container(
-        ptg.Label(
-            "[bold #FFCB47]╔══════════════════════════════════════════════════════╗[/]",
-            parent_align=ptg.HorizontalAlignment.CENTER,
-        ),
-        ptg.Label(
-            "[bold #FFCB47]║    🖥️  UI Agent MCP — Dashboard                     ║[/]",
-            parent_align=ptg.HorizontalAlignment.CENTER,
-        ),
-        ptg.Label(
-            "[bold #FFCB47]║    Vision: Florence-2 | OCR: GLM-OCR (Z.AI)       ║[/]",
-            parent_align=ptg.HorizontalAlignment.CENTER,
-        ),
-        ptg.Label(
-            "[bold #FFCB47]╚══════════════════════════════════════════════════════╝[/]",
-            parent_align=ptg.HorizontalAlignment.CENTER,
-        ),
-        box="EMPTY",
-    )
-
-def build_system_status() -> ptg.Container:
-    """Build system status card."""
-    gpu = check_gpu()
-    models = get_model_status()
-    stats = get_action_stats()
-
-    gpu_icon = "🟢" if gpu["available"] else "⚪"
-    florence_icon = "✅" if models["florence"]["exists"] else "❌"
-    glm_icon = "✅" if models["glm_ocr"]["exists"] else "❌"
-
-    return ptg.Container(
-        ptg.Label(f"[bold #369EFF]System Status[/]"),
-        ptg.HorizontalRule(),
-        ptg.Label(f"{gpu_icon} GPU: {gpu['name']}"),
-        ptg.Label(f"   Memory: {gpu['memory']}  Util: {gpu['util']}"),
-        ptg.Label(""),
-        ptg.Label(f"{florence_icon} Florence-2: {'Downloaded' if models['florence']['exists'] else 'Missing'} ({models['florence']['size']})"),
-        ptg.Label(f"{glm_icon} GLM-OCR: {'Downloaded' if models['glm_ocr']['exists'] else 'Missing'} ({models['glm_ocr']['size']})"),
-        ptg.Label(""),
-        ptg.Label(f"📊 Actions: {stats['total']} total | {stats['last_hour']} this hour | {stats['errors']} errors"),
-        ptg.Label(f"🕐 Last: {stats['last_action']}"),
-        box="DOUBLE",
-        width=50,
-    )
-
-def build_quick_actions(manager: ptg.WindowManager) -> ptg.Container:
-    """Build quick actions card with interactive buttons."""
-
-    status_label = ptg.Label("[dim]Ready[/]")
-
-    def on_health_check():
-        status_label.value = "[dim yellow]Running health check...[/]"
-        def run():
-            output = run_cmd(f"cd {BASE_DIR} && bash scripts/health_check.sh")
-            status_label.value = f"[dim green]Health check done[/]"
-        threading.Thread(target=run, daemon=True).start()
-
-    def on_start_server():
-        status_label.value = "[dim yellow]Starting MCP server...[/]"
-        def run():
-            output = run_cmd(f"cd {BASE_DIR} && source .venv/bin/activate && python server.py &", timeout=2)
-            status_label.value = f"[dim green]Server starting...[/]"
-        threading.Thread(target=run, daemon=True).start()
-
-    def on_download_models():
-        status_label.value = "[dim yellow]Downloading models (this takes a while)...[/]"
-        def run():
-            output = run_cmd(f"cd {BASE_DIR} && source .venv/bin/activate && python scripts/download_models.sh", timeout=300)
-            status_label.value = f"[dim green]Models download complete[/]"
-        threading.Thread(target=run, daemon=True).start()
-
-    def on_view_logs():
-        logs = get_recent_logs(5)
-        log_text = "\n".join([f"  {e.get('time_iso','?')[:19]} | {e.get('action','?')}" for e in logs]) or "  No logs yet"
-        status_label.value = f"[dim]{log_text}[/]"
-
-    def on_refresh(manager):
-        manager.toast("[bold]Refreshing...[/]")
-
-    return ptg.Container(
-        ptg.Label("[bold #FF6B9D]Quick Actions[/]"),
-        ptg.HorizontalRule(),
-        ptg.Button("🔍 Health Check", on_click=lambda _: on_health_check()),
-        ptg.Button("🚀 Start Server", on_click=lambda _: on_start_server()),
-        ptg.Button("📥 Download Models", on_click=lambda _: on_download_models()),
-        ptg.Button("📋 View Recent Logs", on_click=lambda _: on_view_logs()),
-        ptg.Button("🔄 Refresh", on_click=lambda _: on_refresh(manager)),
-        ptg.HorizontalRule(),
-        status_label,
-        box="DOUBLE",
-        width=50,
-    )
-
-def build_server_controls(manager: ptg.WindowManager) -> ptg.Container:
-    """Build server control panel."""
-    server_status = ptg.Label("[dim]Not running[/]")
-    log_area = ptg.Label("[dim]Logs will appear here...[/]")
-
-    def start_server():
-        server_status.value = "[bold green]● Running[/]"
-        log_area.value = "[dim]Starting server...\n"
-        def run():
-            proc = subprocess.Popen(
-                ["bash", "-c", f"cd {BASE_DIR} && source .venv/bin/activate && python server.py"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            )
-            for line in proc.stdout:
-                log_area.value += f"  {line.strip()}\n"
-                if len(log_area.value) > 2000:
-                    log_area.value = log_area.value[-1000:]
-        threading.Thread(target=run, daemon=True).start()
-
-    def stop_server():
-        run_cmd("pkill -f 'python server.py' || true")
-        server_status.value = "[dim]Stopped[/]"
-        log_area.value += "\n[dim]Server stopped[/]"
-
-    def restart_server():
-        stop_server()
-        time.sleep(1)
-        start_server()
-
-    return ptg.Container(
-        ptg.Label("[bold #369EFF]Server Control[/]"),
-        ptg.HorizontalRule(),
-        server_status,
-        ptg.Splitter(
-            ptg.Button("▶ Start", on_click=lambda _: start_server()),
-            ptg.Button("⏹ Stop", on_click=lambda _: stop_server()),
-            ptg.Button("🔄 Restart", on_click=lambda _: restart_server()),
-        ),
-        ptg.Label("[dim]── Logs ──[/]"),
-        log_area,
-        box="DOUBLE",
-    )
-
-def build_config_display() -> ptg.Container:
-    """Show current configuration."""
-    env = {}
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().split("\n"):
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
-
-    device = env.get("DEVICE", "cpu").upper()
-    vision = env.get("VISION_MODEL", "florence-2-base")
-
-    return ptg.Container(
-        ptg.Label("[bold #47FF87]Configuration[/]"),
-        ptg.HorizontalRule(),
-        ptg.Label(f"🖥️  Device: [bold]{device}[/]"),
-        ptg.Label(f"👁️  Vision Model: [bold]{vision}[/]"),
-        ptg.Label(f"🔤 OCR Model: [bold]GLM-OCR (Z.AI)[/]"),
-        ptg.Label(f"📁 Project: [dim]{BASE_DIR}[/]"),
-        box="DOUBLE",
-        width=50,
-    )
-
-def build_footer() -> ptg.Container:
-    """Build footer."""
-    return ptg.Container(
-        ptg.Label(
-            "[dim]UI Agent MCP v1.0.0 | Press Ctrl+C to quit | ESC to go back[/]",
-            parent_align=ptg.HorizontalAlignment.CENTER,
-        ),
-        box="EMPTY",
-    )
-
-
-# ════════════════════════════════════════════════════════════
-#  MAIN
-# ════════════════════════════════════════════════════════════
 
 def main():
-    with ptg.WindowManager() as manager:
-        # Set dark theme
-        ptg.ColorSystem().set_default("border", "#369EFF")
-        ptg.ColorSystem().set_default("corner", "#FFCB47")
+    server_proc = [None]
 
-        # Layout: Top to bottom
+    with ptg.WindowManager() as manager:
+        # ──── Header ────
+        header = ptg.Container(
+            ptg.Label("[bold gold1]UI Agent MCP — Dashboard[/]", parent_align=ptg.HorizontalAlignment.CENTER),
+            ptg.Label("[dim]Florence-2 Vision + GLM-OCR (Z.AI)[/]", parent_align=ptg.HorizontalAlignment.CENTER),
+            box="DOUBLE",
+        )
+
+        # ──── System Status ────
+        gpu = check_gpu()
+        mdl = get_models()
+        stats = get_stats()
+
+        gpu_icon = "[green]●[/]" if gpu["available"] else "[dim]○[/]"
+        fl_icon = "[green]✓[/]" if mdl["florence"] else "[red]✗[/]"
+        glm_icon = "[green]✓[/]" if mdl["glm"] else "[red]✗[/]"
+
+        sys_card = ptg.Container(
+            ptg.Label("[bold deep_sky_blue1]System[/]"),
+            ptg.Label("─" * 40),
+            ptg.Label(f"{gpu_icon} GPU: {gpu['name']}"),
+            ptg.Label(f"   Mem: {gpu['memory']}  Util: {gpu['util']}"),
+            ptg.Label(""),
+            ptg.Label(f"{fl_icon} Florence-2: {'OK' if mdl['florence'] else 'Missing'} ({mdl['florence_sz']})"),
+            ptg.Label(f"{glm_icon} GLM-OCR: {'OK' if mdl['glm'] else 'Missing'} ({mdl['glm_sz']})"),
+            ptg.Label(""),
+            ptg.Label(f"Actions: {stats['total']} | {stats['last_hour']}/hr | {stats['errors']} err"),
+            ptg.Label(f"Last: {stats['last']}"),
+            box="SINGLE",
+            width=42,
+        )
+
+        # ──── Quick Actions ────
+        status_lb = ptg.Label("[dim]Ready[/]")
+
+        def do_health():
+            status_lb.value = "[yellow]Running...[/]"
+            def t():
+                run_cmd(f"cd {BASE_DIR} && bash scripts/health_check.sh")
+                status_lb.value = "[green]Done ✓[/]"
+            threading.Thread(target=t, daemon=True).start()
+
+        def do_start():
+            status_lb.value = "[yellow]Starting server...[/]"
+            def t():
+                proc = subprocess.Popen(
+                    ["bash", "-c", f"cd {BASE_DIR} && source .venv/bin/activate && python server.py"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                )
+                server_proc[0] = proc
+                status_lb.value = "[green]● Server Running[/]"
+            threading.Thread(target=t, daemon=True).start()
+
+        def do_stop():
+            run_cmd("pkill -f 'python server.py' || true")
+            status_lb.value = "[dim]● Stopped[/]"
+
+        def do_logs():
+            logs = get_logs(6)
+            if not logs:
+                status_lb.value = "[dim]No logs yet[/]"
+                return
+            txt = "\n".join(f"[dim]{l.get('time_iso','?')[:19]} | {l.get('action','?')}[/]" for l in logs)
+            status_lb.value = txt
+
+        actions_card = ptg.Container(
+            ptg.Label("[bold hot_pink]Actions[/]"),
+            ptg.Label("─" * 40),
+            ptg.Button("🔍 Health Check", on_click=lambda _: do_health()),
+            ptg.Button("▶ Start Server", on_click=lambda _: do_start()),
+            ptg.Button("⏹ Stop Server", on_click=lambda _: do_stop()),
+            ptg.Button("📋 Recent Logs", on_click=lambda _: do_logs()),
+            ptg.Label("─" * 40),
+            status_lb,
+            box="SINGLE",
+            width=42,
+        )
+
+        # ──── Server Log Panel ────
+        log_lb = ptg.Label("[dim]Click Start Server to see logs...[/]")
+
+        server_card = ptg.Container(
+            ptg.Label("[bold lime_green]Server Logs[/]"),
+            ptg.Label("─" * 80),
+            log_lb,
+            box="SINGLE",
+        )
+
+        def start_with_log():
+            log_lb.value = "[dim]Starting...[/]\n"
+            status_lb.value = "[yellow]Starting...[/]"
+            def t():
+                proc = subprocess.Popen(
+                    ["bash", "-c", f"cd {BASE_DIR} && source .venv/bin/activate && python server.py"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+                )
+                server_proc[0] = proc
+                status_lb.value = "[green]● Running[/]"
+                for line in iter(proc.stdout.readline, ''):
+                    if line:
+                        log_lb.value += f"[dim]{line.rstrip()}[/]\n"
+                    if len(log_lb.value) > 3000:
+                        log_lb.value = log_lb.value[-1500:]
+            threading.Thread(target=t, daemon=True).start()
+
+        # Override start button
+        actions_card += ptg.Button("▶ Start + Logs", on_click=lambda _: start_with_log())
+
+        # ──── Config Card ────
+        dev = "CPU"
+        if ENV_FILE.exists():
+            for ln in ENV_FILE.read_text().split("\n"):
+                if ln.startswith("DEVICE="):
+                    dev = ln.split("=")[1].strip().upper()
+
+        cfg_card = ptg.Container(
+            ptg.Label("[bold yellow]Config[/]"),
+            ptg.Label("─" * 40),
+            ptg.Label(f"Device: [bold]{dev}[/]"),
+            ptg.Label("Vision: [bold]florence-2-base[/]"),
+            ptg.Label("OCR: [bold]GLM-OCR[/]"),
+            ptg.Label(f"Path: [dim]{BASE_DIR}[/]"),
+            box="SINGLE",
+            width=42,
+        )
+
+        # ──── Footer ────
+        footer = ptg.Container(
+            ptg.Label("[dim]q = quit | r = refresh[/]", parent_align=ptg.HorizontalAlignment.CENTER),
+            box="EMPTY",
+        )
+
+        # ──── Layout ────
+        top_row = ptg.Splitter(sys_card, actions_card)
+        bottom_row = ptg.Splitter(server_card, cfg_card)
+
         manager.layout.add_slot("header")
-        manager.layout.add_slot("body", size=0.7)
+        manager.layout.add_slot("body")
         manager.layout.add_slot("footer", size=3)
 
-        # Header
-        manager.add(build_header(), slot="header")
+        manager.add(header, slot="header")
+        manager.add(ptg.Container(top_row, box="EMPTY"), slot="body")
+        manager.add(ptg.Container(bottom_row, box="EMPTY"), slot="body")
+        manager.add(footer, slot="footer")
 
-        # Body: Left column + Right column
-        left = build_system_status()
-        right = build_quick_actions(manager)
-        server = build_server_controls(manager)
-        config = build_config_display()
-
-        body = ptg.Splitter(left, right)
-        body2 = ptg.Splitter(server, config)
-
-        manager.add(ptg.Container(body, box="EMPTY"), slot="body")
-        manager.add(ptg.Container(body2, box="EMPTY"), slot="body")
-
-        # Footer
-        manager.add(build_footer(), slot="footer")
-
-        # Keybindings
         @manager.bind("q", "quit")
         def _():
+            if server_proc[0]:
+                server_proc[0].terminate()
             manager.stop()
 
         @manager.bind("r", "refresh")
         def _():
-            manager.toast("[bold]Refreshing dashboard...[/]")
+            manager.toast("[bold]Refreshed[/]")
 
-    print("\n👋 Thanks for using UI Agent MCP!\n")
+    print("\n👋 Dashboard closed\n")
 
 
 if __name__ == "__main__":
-    print("\n🚀 Starting UI Agent MCP Dashboard...\n")
     main()
