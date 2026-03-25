@@ -1,78 +1,73 @@
-# ui-agent-mcp
+# UI Agent MCP
 
-MCP server that gives AI agents **complete UI access** — see screens, understand elements, click, type, scroll, drag.
+Give AI agents **complete UI access** — see screens, read text, click, type, scroll, drag.
 
-## Models
-
-| Model | Size | Purpose | Source |
-|-------|------|---------|--------|
-| **Florence-2** | 0.23B | UI understanding, element detection, captioning | `microsoft/Florence-2-base` |
-| **GLM-OCR** | 0.9B | Text, table, formula, form extraction | `zai-org/GLM-OCR` |
-
-## One-Command Install
+## 🚀 One-Command Install
 
 ```bash
-# Clone and install everything
+curl -fsSL https://raw.githubusercontent.com/4shil/ui-agent-mcp/main/quickinstall.sh | bash
+```
+
+Or manual:
+```bash
 git clone https://github.com/4shil/ui-agent-mcp.git
 cd ui-agent-mcp
 bash install.sh
 ```
 
-The installer handles everything:
-- System dependencies (python, xdotool, git)
-- Python venv + pip packages
-- GPU detection (NVIDIA CUDA / Apple MPS / CPU)
-- AI model downloads (~2.3GB)
-- MCP config generation
-- Systemd service setup
+## 🧠 Models
 
-## Quick Start
+| Model | Size | Purpose |
+|-------|------|---------|
+| **Florence-2** (Microsoft) | ~0.9GB | UI understanding, element detection |
+| **GLM-OCR** (Z.AI) | ~0.7GB | Text, table, formula extraction |
+
+Both auto-download during install. GPU (NVIDIA CUDA) recommended but CPU works.
+
+## 🎮 TUI Dashboard
+
+Launch the interactive dashboard after install:
 
 ```bash
-# After install, start the server:
+cd ~/ui-agent-mcp
+source .venv/bin/activate
+python dashboard.py
+```
+
+Features:
+- 🔥 Live GPU monitoring (utilization bar, memory, temperature)
+- 💻 System stats (CPU, RAM, uptime)
+- 🤖 Model download status
+- 📊 Action analytics (total, hourly, errors, top actions)
+- 🖥️ Live MCP server log streaming
+- 📥 One-click model download
+- 🔍 Health check
+- ⌨️ `q` = quit, `r` = refresh
+
+## 🔌 MCP Server
+
+Start the MCP server (25 tools for AI agents):
+
+```bash
 source .venv/bin/activate
 python server.py
-
-# Or use the systemd service:
-systemctl --user start ui-agent-mcp
 ```
 
-## Health Check
+### MCP Config
 
-```bash
-bash scripts/health_check.sh
-```
-
-Shows status of all components, models, and dependencies.
-
-## Uninstall
-
-```bash
-bash scripts/uninstall.sh
-```
-
-## MCP Config
-
-The installer auto-generates config for OpenClaw and Claude Desktop.
-
-Manual config (`mcp_config.json`):
 ```json
 {
   "mcpServers": {
     "ui-agent": {
       "command": "python3",
       "args": ["server.py"],
-      "cwd": "/path/to/ui-agent-mcp",
-      "env": {
-        "VISION_MODEL": "florence-2-base",
-        "DEVICE": "cpu"
-      }
+      "cwd": "/home/USER/ui-agent-mcp"
     }
   }
 }
 ```
 
-## 25 Tools
+## 🛠 25 Tools
 
 ### Screen Capture
 `screenshot` · `screenshot_region` · `get_screen_info`
@@ -80,7 +75,7 @@ Manual config (`mcp_config.json`):
 ### Vision (Florence-2)
 `describe_ui` · `describe_ui_detailed` · `locate_element` · `locate_all` · `detect_all`
 
-### OCR (GLM-OCR by Z.AI)
+### OCR (GLM-OCR)
 `read_text` · `read_text_region` · `read_table` · `read_formula` · `read_form`
 
 ### Mouse
@@ -89,58 +84,70 @@ Manual config (`mcp_config.json`):
 ### Keyboard
 `type_text` · `press_key` · `hotkey` · `type_and_enter`
 
-### Composite (Smart)
+### Composite
 `find_and_click` · `type_into` · `wait_for_element`
 
-### Apps
-`open_app` · `close_app` · `get_focused_window`
+### Apps & Safety
+`open_app` · `close_app` · `get_focused_window` · `get_safety_stats`
 
-### Safety
-`get_safety_stats`
+## 📋 Agent Loop Pattern
 
-## Project Structure
+```
+1. screenshot()                    → see
+2. describe_ui() / read_text()     → understand
+3. locate_element()                → find
+4. click() / type()                → act
+5. screenshot()                    → verify
+```
+
+## 🔧 Commands
+
+```bash
+bash install.sh              # Full install (deps + venv + models + config)
+bash scripts/health_check.sh # Verify everything
+bash scripts/download_models.sh  # Re-download models
+bash scripts/uninstall.sh    # Remove everything
+python dashboard.py          # Launch TUI dashboard
+python server.py             # Start MCP server
+```
+
+## 📁 Project Structure
 
 ```
 ui-agent-mcp/
 ├── install.sh              # One-command installer
+├── quickinstall.sh         # curl | bash installer
 ├── server.py               # MCP server (25 tools)
-├── vision.py               # Florence-2 vision
+├── dashboard.py            # TUI dashboard
+├── vision.py               # Florence-2 vision engine
 ├── ocr_engine.py           # GLM-OCR text extraction
 ├── screen_capture.py       # Screenshot via mss
-├── ui_controller.py        # Click/type/scroll/drag
+├── ui_controller.py        # Mouse/keyboard actions
 ├── element_finder.py       # Smart find + click
-├── safety.py               # Cooldowns, rate limits
-├── config.py               # All settings
-├── requirements.txt
-├── mcp_config.json
+├── safety.py               # Rate limits, audit log
+├── config.py               # Settings
+├── requirements.txt        # Python deps
+├── requirements-tui.txt    # TUI deps
+├── mcp_config.json         # OpenClaw config
 ├── scripts/
-│   ├── setup_deps.sh       # System dependencies
-│   ├── setup_python.sh     # Python venv + packages
+│   ├── setup_deps.sh       # System packages
+│   ├── setup_python.sh     # Venv + pip with progress
 │   ├── detect_gpu.sh       # GPU detection
-│   ├── download_models.sh  # Model downloads
+│   ├── download_models.sh  # Model downloader
 │   ├── setup_mcp.sh        # MCP config generator
 │   ├── setup_service.sh    # Systemd service
 │   ├── health_check.sh     # Status checker
 │   └── uninstall.sh        # Cleanup
-└── tests/
-    └── test_all.py
+├── tests/
+│   └── test_all.py
+└── models/                 # AI models (downloaded)
 ```
 
-## Agent Loop Pattern
-
-```
-1. screenshot()                    → see the screen
-2. describe_ui() or read_text()    → understand what's there
-3. locate_element()                → find target
-4. click() / type() / scroll()     → take action
-5. screenshot() again              → verify result
-```
-
-## Requirements
+## 📦 Requirements
 
 - Python 3.10+
 - Linux (x11) / macOS / Windows
-- GPU optional (CUDA recommended for GLM-OCR speed)
+- GPU optional (NVIDIA CUDA recommended)
 
 ## License
 
