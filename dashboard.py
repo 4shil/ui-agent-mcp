@@ -154,11 +154,12 @@ def main():
             box="DOUBLE",
         ))
 
-        @mgr.bind("q", "quit")
-        def _():
+        def quit_fn():
             if srv[0]:
                 srv[0].terminate()
             mgr.stop()
+
+        mgr.bind("q", "quit", quit_fn)
 
     print("\n👋 Dashboard closed\n")
 
