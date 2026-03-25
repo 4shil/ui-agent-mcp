@@ -1,0 +1,2 @@
+# requirements-tui.txt — TUI dashboard dependencies
+pytermgui>=7.7.0
