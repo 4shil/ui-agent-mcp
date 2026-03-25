@@ -53,6 +53,38 @@ source .venv/bin/activate
 python server.py
 ```
 
+## 🐳 Docker
+
+Build image:
+
+```bash
+docker build -t ui-agent-mcp .
+```
+
+Run with NVIDIA GPU + REST port:
+
+```bash
+docker run --gpus all -p 8080:8080 ui-agent-mcp
+```
+
+Use Docker Compose (includes GPU flag and model cache volume):
+
+```bash
+docker compose up --build
+```
+
+Use CUDA base image variant (optional):
+
+```bash
+BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 docker compose up --build
+```
+
+Notes:
+- MCP server runs over stdio (default process in container)
+- Optional REST API is available on `http://localhost:8080`
+- Models are cached in the `models_cache` named volume
+- Set `HF_TOKEN` in your environment if gated model access is required
+
 ### MCP Config
 
 ```json
