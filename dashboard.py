@@ -33,28 +33,28 @@ def sh(c, t=10):
 def init_colors():
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN, -1)      # info
-    curses.init_pair(2, curses.COLOR_GREEN, -1)      # good
-    curses.init_pair(3, curses.COLOR_RED, -1)         # bad
-    curses.init_pair(4, curses.COLOR_YELLOW, -1)      # warn
-    curses.init_pair(5, curses.COLOR_BLUE, -1)        # accent
-    curses.init_pair(6, curses.COLOR_MAGENTA, -1)     # pink
-    curses.init_pair(7, curses.COLOR_WHITE, -1)        # white
-    curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_YELLOW)  # bar bg
+    curses.init_pair(1, curses.COLOR_CYAN, -1)
+    curses.init_pair(2, curses.COLOR_GREEN, -1)
+    curses.init_pair(3, curses.COLOR_RED, -1)
+    curses.init_pair(4, curses.COLOR_YELLOW, -1)
+    curses.init_pair(5, curses.COLOR_BLUE, -1)
+    curses.init_pair(6, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(7, curses.COLOR_WHITE, -1)
+    CP.update({
+        "cyan": curses.color_pair(1),
+        "green": curses.color_pair(2),
+        "red": curses.color_pair(3),
+        "yellow": curses.color_pair(4),
+        "blue": curses.color_pair(5),
+        "pink": curses.color_pair(6),
+        "white": curses.color_pair(7),
+        "dim": curses.color_pair(7) | curses.A_DIM,
+        "bold": curses.color_pair(7) | curses.A_BOLD,
+        "gold": curses.color_pair(4) | curses.A_BOLD,
+    })
 
 
-CP = {
-    "cyan": curses.color_pair(1),
-    "green": curses.color_pair(2),
-    "red": curses.color_pair(3),
-    "yellow": curses.color_pair(4),
-    "blue": curses.color_pair(5),
-    "pink": curses.color_pair(6),
-    "white": curses.color_pair(7),
-    "dim": curses.color_pair(7) | curses.A_DIM,
-    "bold": curses.color_pair(7) | curses.A_BOLD,
-    "gold": curses.color_pair(4) | curses.A_BOLD,
-}
+CP = {}  # Populated by init_colors()
 
 
 # ═══════════════════════════════════════════════════════════
