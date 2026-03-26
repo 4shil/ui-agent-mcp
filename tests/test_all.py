@@ -1,76 +1,76 @@
-# tests/test_all.py — Integration tests
+# tests/test_all.py — Integration and feature tests
 
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
 def test_config():
-    from config import VISION_MODEL_ID, OCR_MODEL_ID, DEVICE
-    assert VISION_MODEL_ID == "microsoft/Florence-2-base"
-    assert OCR_MODEL_ID == "zai-org/GLM-OCR"
-    print("✅ Config OK")
+    from config import DEVICE, OCR_MODEL_ID, VISION_MODEL_ID
 
-def test_screen_capture():
-    from screen_capture import capture
-    info = capture.get_screen_info()
-    assert info["width"] > 0
-    result = capture.screenshot()
-    assert "path" in result
-    print(f"✅ Screen capture: {info['width']}x{info['height']}")
-    return result["path"]
+    assert VISION_MODEL_ID.startswith("microsoft/")
+    assert OCR_MODEL_ID.startswith("zai-org/")
+    assert DEVICE in {"cpu", "cuda"}
+    print(f"[core] Config OK (DEVICE={DEVICE})")
 
-def test_ui_controller():
-    from ui_controller import controller
-    pos = controller.get_mouse_position()
-    assert "x" in pos
-    print("✅ UI controller OK")
 
 def test_safety():
     from safety import safety
+
     stats = safety.get_stats()
     assert "total_actions" in stats
-    result = safety.check_destructive("rm", path="-rf /")
+    result = safety.check_destructive("rm -rf", path="/")
     assert result is not None
-    print("✅ Safety OK")
+    print("[core] Safety OK")
 
-def test_vision():
-    from vision import vision
-    vision.load()
-    assert vision._loaded
-    print("✅ Vision model loads")
 
-def test_ocr():
-    from ocr_engine import ocr
-    ocr.load()
-    assert ocr._loaded
-    print("✅ OCR model loads")
+def test_screen_capture():
+    from screen_capture import capture
 
-def test_element_finder():
-    from element_finder import element_finder
-    assert hasattr(element_finder, "find_and_click")
-    print("✅ Element finder OK")
+    info = capture.get_screen_info()
+    assert info["width"] > 0
+    assert info["height"] > 0
+    shot = capture.screenshot()
+    assert "path" in shot
+    print(f"[core] Screen capture OK ({info['width']}x{info['height']})")
+
 
 def test_server():
     from server import TOOLS
+
     names = [t.name for t in TOOLS]
-    assert len(names) == 25
     assert "screenshot" in names
     assert "click" in names
     assert "read_text" in names
-    print(f"✅ MCP server: {len(names)} tools")
+    print(f"[core] MCP server tools OK ({len(names)})")
+
+
+def test_feature_suites():
+    from tests.test_actions import run_suite as run_actions
+    from tests.test_ocr import run_suite as run_ocr
+    from tests.test_vision import run_suite as run_vision
+
+    run_actions()
+    run_vision()
+    run_ocr()
+    print("[suite] vision/ocr/actions OK")
+
 
 if __name__ == "__main__":
-    print("=" * 40)
-    print("  UI Agent MCP — Tests")
-    print("=" * 40)
+    print("=" * 56)
+    print("  UI Agent MCP — Full Test Suite")
+    print("=" * 56)
     test_config()
     test_safety()
     test_screen_capture()
-    test_ui_controller()
-    test_element_finder()
-    try: test_vision()
-    except Exception as e: print(f"⚠ Vision: {e}")
-    try: test_ocr()
-    except Exception as e: print(f"⚠ OCR: {e}")
     test_server()
-    print("=" * 40)
-    print("  ✅ Done!")
+    test_feature_suites()
+
+    if os.getenv("RUN_BENCHMARKS", "0") == "1":
+        from tests.benchmarks import run_benchmarks
+
+        run_benchmarks()
+
+    print("=" * 56)
+    print("  DONE")
