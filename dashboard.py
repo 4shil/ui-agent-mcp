@@ -194,66 +194,74 @@ class Dashboard:
 
         # ═══ ROW 1: CPU | RAM ═══
         R = 5  # row start
+        content_w = hw - 4  # fixed content width inside boxes
 
         # CPU box top
         sw(scr, R, 0, "╭─ CPU " + "─" * (hw - 8) + "╮", B(1))
-        # CPU content
-        bar_s = hw - 16
-        btxt, battr = bar_str(cpu, bar_s)
-        sw(scr, R+1, 0, "│ Use: ", B(1))
-        sw(scr, R+1, 7, btxt, battr)
-        sw(scr, R+1, 7 + bar_s + 1, f"{cpu:3.0f}%", curses.A_BOLD)
+        # CPU bar
+        bar_w = min(content_w - 8, 25)
+        btxt, battr = bar_str(cpu, bar_w)
+        sw(scr, R+1, 0, "│ Use:", B(1))
+        sw(scr, R+1, 6, btxt, battr)
+        pct_str = f" {cpu:3.0f}%"
+        sw(scr, R+1, 6 + bar_w, pct_str, curses.A_BOLD)
         sw(scr, R+1, hw - 1, "│", B(1))
 
-        spark_s = hw - 12
-        sp = spark_str(self.data.cpu_h, spark_s)
-        sw(scr, R+2, 0, "│ Hist ", B(1))
-        sw(scr, R+2, 6, sp, B(2))
+        # CPU sparkline — fixed width
+        spark_w = content_w - 6
+        sp = spark_str(self.data.cpu_h, spark_w)
+        sw(scr, R+2, 0, "│ ", B(1))
+        sw(scr, R+2, 2, sp.ljust(spark_w), B(2))
         sw(scr, R+2, hw - 1, "│", B(1))
 
-        sw(scr, R+3, 0, "│" + " " * (hw - 2) + "│", B(1))
+        # Fill remaining lines
+        for i in range(3, 5):
+            sw(scr, R+i, 0, "│" + " " * (hw - 2) + "│", B(1))
         sw(scr, R+4, 0, "╰" + "─" * (hw - 2) + "╯", B(1))
 
         # RAM box
         sw(scr, R, hw, "╭─ MEMORY " + "─" * (hw - 11) + "╮", B(1))
-        btxt, battr = bar_str(rpct, bar_s)
-        sw(scr, R+1, hw, "│ Use: ", B(1))
-        sw(scr, R+1, hw + 7, btxt, battr)
-        sw(scr, R+1, hw + 7 + bar_s + 1, f"{rpct:3.0f}%", curses.A_BOLD)
+        btxt, battr = bar_str(rpct, bar_w)
+        sw(scr, R+1, hw, "│ Use:", B(1))
+        sw(scr, R+1, hw + 6, btxt, battr)
+        pct_str = f" {rpct:3.0f}%"
+        sw(scr, R+1, hw + 6 + bar_w, pct_str, curses.A_BOLD)
         sw(scr, R+1, W - 1, "│", B(1))
 
-        sp = spark_str(self.data.ram_h, spark_s)
-        sw(scr, R+2, hw, "│ Hist ", B(1))
-        sw(scr, R+2, hw + 6, sp, B(2))
+        sp = spark_str(self.data.ram_h, spark_w)
+        sw(scr, R+2, hw, "│ ", B(1))
+        sw(scr, R+2, hw + 2, sp.ljust(spark_w), B(2))
         sw(scr, R+2, W - 1, "│", B(1))
 
         ram_info = f"{ru} / {rt}"
-        sw(scr, R+3, hw, f"│ {ram_info}" + " " * max(0, W - hw - len(ram_info) - 3) + "│", B(6))
+        sw(scr, R+3, hw, f"│ {ram_info}" + " " * max(0, hw - len(ram_info) - 4) + "│", B(6))
+        sw(scr, R+4, hw, "│" + " " * (hw - 2) + "│", B(1))
         sw(scr, R+4, hw, "╰" + "─" * (hw - 2) + "╯", B(1))
 
         # ═══ ROW 2: GPU | MODELS ═══
-        R2 = R + 5
+        R2 = R + 6
 
         # GPU
         sw(scr, R2, 0, "╭─ GPU " + "─" * (hw - 8) + "╮", B(2))
         if gpus:
             g = gpus[0]
-            sw(scr, R2+1, 0, f"│ {g['name'][:hw-4]}", B(2) | curses.A_BOLD)
+            sw(scr, R2+1, 0, "│ " + g['name'][:hw-4].ljust(hw-3), B(2) | curses.A_BOLD)
             sw(scr, R2+1, hw - 1, "│", B(2))
 
-            btxt, battr = bar_str(g['util'], bar_s)
-            sw(scr, R2+2, 0, "│ Use: ", B(2))
-            sw(scr, R2+2, 7, btxt, battr)
-            sw(scr, R2+2, 7 + bar_s + 1, f"{g['util']:3.0f}%", curses.A_BOLD)
+            btxt, battr = bar_str(g['util'], bar_w)
+            sw(scr, R2+2, 0, "│ Use:", B(2))
+            sw(scr, R2+2, 6, btxt, battr)
+            sw(scr, R2+2, 6 + bar_w, f" {g['util']:3.0f}%", curses.A_BOLD)
             sw(scr, R2+2, hw - 1, "│", B(2))
 
-            sw(scr, R2+3, 0, f"│ Mem: {g['mu']}/{g['mt']}" + " " * max(0, hw - len(g['mu']) - len(g['mt']) - 12) + "│", B(1))
+            mem_str = f"│ Mem: {g['mu']}/{g['mt']}"
+            sw(scr, R2+3, 0, mem_str.ljust(hw-1) + "│", B(1))
 
             tc = B(3) if g['temp'] > 70 else B(6)
-            sw(scr, R2+4, 0, f"│ Temp: {g['temp']:.0f}°C", tc)
-            sw(scr, R2+4, hw - 1, "│", B(2))
+            temp_str = f"│ Temp: {g['temp']:.0f}°C"
+            sw(scr, R2+4, 0, temp_str.ljust(hw-1) + "│", tc)
         else:
-            sw(scr, R2+1, 0, "│ No GPU detected", B(6))
+            sw(scr, R2+1, 0, "│ No GPU detected".ljust(hw-1) + "│", B(6))
             for i in range(2, 5):
                 sw(scr, R2+i, 0, "│" + " " * (hw - 2) + "│", B(1))
         sw(scr, R2+5, 0, "╰" + "─" * (hw - 2) + "╯", B(2))
