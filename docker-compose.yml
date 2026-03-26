@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  ui-agent-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: "${BASE_IMAGE:-python:3.12-slim}"
+    image: ui-agent-mcp
+    container_name: ui-agent-mcp
+    environment:
+      ENABLE_REST_API: "1"
+      REST_API_PORT: "8080"
+      DOWNLOAD_MODELS_ON_START: "1"
+      HF_TOKEN: "${HF_TOKEN:-}"
+    volumes:
+      - models_cache:/app/models
+      - logs_cache:/app/logs
+      - screenshots_cache:/app/screenshots
+    ports:
+      - "8080:8080"
+    stdin_open: true
+    tty: true
+    gpus: all
+
+volumes:
+  models_cache:
+  logs_cache:
+  screenshots_cache:

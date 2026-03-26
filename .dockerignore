@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+models/
+logs/
+screenshots/
+.cache/
+.pytest_cache/
+*.ipynb
