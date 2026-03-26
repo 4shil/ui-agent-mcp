@@ -22,7 +22,7 @@ rest_pid=""
 if [[ "${ENABLE_REST_API:-1}" == "1" ]]; then
   rest_port="${REST_API_PORT:-8080}"
   echo "[entrypoint] Starting REST API on 0.0.0.0:${rest_port}"
-  uvicorn api_server:app --host 0.0.0.0 --port "${rest_port}" &
+  uvicorn api:app --host 0.0.0.0 --port "${rest_port}" &
   rest_pid="$!"
 fi
 
