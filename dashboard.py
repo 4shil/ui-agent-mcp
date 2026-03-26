@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""UI Agent MCP — Btop-Style Dashboard v5 — No wrap, no spawn."""
+"""UI Agent MCP — Btop-Style Dashboard v6 — Pure ANSI, no flicker."""
 
-import curses
-import time
-import json
-import subprocess
-import threading
+import sys, os, time, json, subprocess, threading, shutil, select, termios, tty
 from pathlib import Path
 from collections import deque
 from datetime import datetime
@@ -22,8 +18,8 @@ def sh(c, t=10):
 
 class Data:
     def __init__(self):
-        self.cpu_h = deque(maxlen=50)
-        self.ram_h = deque(maxlen=50)
+        self.cpu_h = deque(maxlen=40)
+        self.ram_h = deque(maxlen=40)
 
     def cpu(self):
         o = sh("top -bn1 | grep 'Cpu(s)' | awk '{print 100 - $8}'")
@@ -82,69 +78,41 @@ class Data:
         return len(lines), hr, err, last, sorted(acts.items(), key=lambda x: -x[1])[:6]
 
 
-# ── Safe write: clips to bounds, NEVER wraps ──
-def sw(scr, y, x, text, attr=0, maxw=None):
-    """Write text at position, clipped to screen bounds."""
-    H, W = scr.getmaxyx()
-    if y < 0 or y >= H or x >= W - 1:
-        return
-    if maxw:
-        avail = min(maxw, W - x - 1)
-    else:
-        avail = W - x - 1
-    if avail <= 0:
-        return
-    text = text[:avail]  # CLIP — no wrapping
-    try:
-        scr.addnstr(y, x, text, avail, attr)
-    except curses.error:
-        pass
+# ── ANSI colors ──
+RST = "\033[0m"; B = "\033[1m"; D = "\033[2m"
+RED = "\033[1;31m"; GRN = "\033[1;32m"; YEL = "\033[1;33m"
+CYN = "\033[1;36m"; WHT = "\033[1;37m"; PNK = "\033[1;35m"; GLD = "\033[1;38;5;220m"
 
+def bc(pct):
+    if pct > 80: return RED
+    if pct > 40: return YEL
+    return GRN
 
-def bar_str(pct, w):
-    """Build bar string."""
+def bar(pct, w):
     f = int(pct / 100 * w)
-    if pct > 80:
-        return "█" * f + "░" * (w - f), curses.color_pair(3) | curses.A_BOLD
-    elif pct > 40:
-        return "█" * f + "░" * (w - f), curses.color_pair(4) | curses.A_BOLD
-    else:
-        return "█" * f + "░" * (w - f), curses.color_pair(2) | curses.A_BOLD
+    return f"{bc(pct)}{'█' * f}{D}{'░' * (w - f)}{RST}"
 
-
-def spark_str(history, w):
-    """Build sparkline string."""
-    if not history or w <= 0:
-        return ""
+def spark(hist, w):
+    if not hist: return D + "─" * w + RST
     chars = "▁▂▃▄▅▆▇█"
-    d = list(history)[-w:]
+    d = list(hist)[-w:]
     lo, hi = min(d), max(d)
     rng = hi - lo if hi != lo else 1
     return "".join(chars[min(int((v - lo) / rng * 8), 8)] for v in d)
 
+def pad(text, w):
+    """Pad text to exact width, strip ANSI for length calc."""
+    clean = text.replace('\033', '').partition('m')[-1] if '\033' in text else text
+    return text + " " * max(0, w - len(clean))
+
 
 class Dashboard:
-    def __init__(self, stdscr):
-        self.stdscr = stdscr
+    def __init__(self):
+        self.running = True
         self.proc = None
         self.data = Data()
-        self.logs = deque(maxlen=10)
+        self.logs = deque(maxlen=8)
         self.t0 = time.time()
-
-        curses.start_color()
-        curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_CYAN, -1)
-        curses.init_pair(2, curses.COLOR_GREEN, -1)
-        curses.init_pair(3, curses.COLOR_RED, -1)
-        curses.init_pair(4, curses.COLOR_YELLOW, -1)
-        curses.init_pair(5, curses.COLOR_MAGENTA, -1)
-        curses.init_pair(6, curses.COLOR_WHITE, -1)
-        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
-
-        curses.curs_set(0)
-        stdscr.nodelay(True)
-        stdscr.timeout(2000)  # 2s refresh
-        stdscr.keypad(True)
 
     def start(self):
         self.logs.append(f"[{datetime.now():%H:%M:%S}] Starting...")
@@ -156,7 +124,7 @@ class Dashboard:
             self.proc = proc
             for ln in iter(proc.stdout.readline, ''):
                 if ln and ln.strip():
-                    self.logs.append(f"[{datetime.now():%H:%M:%S}] {ln.rstrip()[:40]}")
+                    self.logs.append(f"[{datetime.now():%H:%M:%S}] {ln.rstrip()[:35]}")
         threading.Thread(target=t, daemon=True).start()
 
     def stop(self):
@@ -164,10 +132,11 @@ class Dashboard:
         self.logs.append(f"[{datetime.now():%H:%M:%S}] Stopped")
 
     def draw(self):
-        scr = self.stdscr
-        H, W = scr.getmaxyx()
+        W = shutil.get_terminal_size((100, 40)).columns
+        hw = W // 2
+        bar_w = min(20, hw - 15)
+        spark_w = hw - 12
 
-        # Collect data
         cpu = self.data.cpu()
         ru, rt, rpct = self.data.ram()
         gpus = self.data.gpu()
@@ -175,178 +144,116 @@ class Dashboard:
         tot, hr, err, last, top = self.data.stats()
         running = self.proc and self.proc.poll() is None
         el = time.time() - self.t0
-        eh, er = divmod(int(el), 3600)
-        em, es = divmod(er, 60)
+        eh, er = divmod(int(el), 3600); em, es = divmod(er, 60)
 
-        hw = W // 2  # half width
-        B = curses.color_pair  # shorthand
+        L = []
 
-        # ═══ CLEAR ONCE ═══
-        scr.erase()
+        # Header
+        L.append(f"{GLD}{'═' * W}{RST}")
+        L.append(f"{GLD}{'UI Agent MCP Dashboard':^{W}}{RST}")
+        L.append(f"{CYN}{'Florence-2 + GLM-OCR (Z.AI)  |  Up: ' + f'{eh:02d}:{em:02d}:{es:02d}':^{W}}{RST}")
+        L.append(f"{GLD}{'═' * W}{RST}")
+        L.append("")
 
-        # ═══ HEADER ═══
-        sw(scr, 0, 0, "═" * W, B(4))
-        t = "UI Agent MCP Dashboard"
-        sw(scr, 1, (W - len(t)) // 2, t, B(4) | curses.A_BOLD)
-        s = f"Florence-2 + GLM-OCR (Z.AI)  |  Up: {eh:02d}:{em:02d}:{es:02d}"
-        sw(scr, 2, (W - len(s)) // 2, s, B(1))
-        sw(scr, 3, 0, "═" * W, B(4))
+        # ── Row 1: CPU + RAM ──
+        L.append(f"{'╭─ CPU ─' + '─' * (hw - 8)}╮{'╭─ MEMORY ─' + '─' * (hw - 11)}╮")
+        L.append(f"│ Use: {pad(bar(cpu, bar_w), hw - 12)}%││ Use: {pad(bar(rpct, bar_w), hw - 12)}%│")
+        L.append(f"│ Hist {pad(spark(self.data.cpu_h, spark_w), hw - 8)}││ {pad(f'{ru} / {rt}', hw - 4)}│")
+        L.append(f"│ Hist {pad(spark(self.data.ram_h, spark_w), hw - 8)}││{' ' * (hw - 2)}│")
+        L.append(f"│{' ' * (hw - 2)}││{' ' * (hw - 2)}│")
+        L.append(f"╰{'─' * (hw - 2)}╯╰{'─' * (hw - 2)}╯")
+        L.append("")
 
-        # ═══ ROW 1: CPU | RAM ═══
-        R = 5  # row start
-        content_w = hw - 4  # fixed content width inside boxes
-
-        # CPU box top
-        sw(scr, R, 0, "╭─ CPU " + "─" * (hw - 8) + "╮", B(1))
-        # CPU bar
-        bar_w = min(content_w - 8, 25)
-        btxt, battr = bar_str(cpu, bar_w)
-        sw(scr, R+1, 0, "│ Use:", B(1))
-        sw(scr, R+1, 6, btxt, battr)
-        pct_str = f" {cpu:3.0f}%"
-        sw(scr, R+1, 6 + bar_w, pct_str, curses.A_BOLD)
-        sw(scr, R+1, hw - 1, "│", B(1))
-
-        # CPU sparkline — fixed width
-        spark_w = content_w - 6
-        sp = spark_str(self.data.cpu_h, spark_w)
-        sw(scr, R+2, 0, "│ ", B(1))
-        sw(scr, R+2, 2, sp.ljust(spark_w), B(2))
-        sw(scr, R+2, hw - 1, "│", B(1))
-
-        # Fill remaining lines
-        for i in range(3, 5):
-            sw(scr, R+i, 0, "│" + " " * (hw - 2) + "│", B(1))
-        sw(scr, R+4, 0, "╰" + "─" * (hw - 2) + "╯", B(1))
-
-        # RAM box
-        sw(scr, R, hw, "╭─ MEMORY " + "─" * (hw - 11) + "╮", B(1))
-        btxt, battr = bar_str(rpct, bar_w)
-        sw(scr, R+1, hw, "│ Use:", B(1))
-        sw(scr, R+1, hw + 6, btxt, battr)
-        pct_str = f" {rpct:3.0f}%"
-        sw(scr, R+1, hw + 6 + bar_w, pct_str, curses.A_BOLD)
-        sw(scr, R+1, W - 1, "│", B(1))
-
-        sp = spark_str(self.data.ram_h, spark_w)
-        sw(scr, R+2, hw, "│ ", B(1))
-        sw(scr, R+2, hw + 2, sp.ljust(spark_w), B(2))
-        sw(scr, R+2, W - 1, "│", B(1))
-
-        ram_info = f"{ru} / {rt}"
-        sw(scr, R+3, hw, f"│ {ram_info}" + " " * max(0, hw - len(ram_info) - 4) + "│", B(6))
-        sw(scr, R+4, hw, "│" + " " * (hw - 2) + "│", B(1))
-        sw(scr, R+4, hw, "╰" + "─" * (hw - 2) + "╯", B(1))
-
-        # ═══ ROW 2: GPU | MODELS ═══
-        R2 = R + 6
-
-        # GPU
-        sw(scr, R2, 0, "╭─ GPU " + "─" * (hw - 8) + "╮", B(2))
+        # ── Row 2: GPU + Models ──
+        L.append(f"{'╭─ GPU ─' + '─' * (hw - 8)}╮{'╭─ AI MODELS ─' + '─' * (hw - 13)}╮")
         if gpus:
             g = gpus[0]
-            sw(scr, R2+1, 0, "│ " + g['name'][:hw-4].ljust(hw-3), B(2) | curses.A_BOLD)
-            sw(scr, R2+1, hw - 1, "│", B(2))
-
-            btxt, battr = bar_str(g['util'], bar_w)
-            sw(scr, R2+2, 0, "│ Use:", B(2))
-            sw(scr, R2+2, 6, btxt, battr)
-            sw(scr, R2+2, 6 + bar_w, f" {g['util']:3.0f}%", curses.A_BOLD)
-            sw(scr, R2+2, hw - 1, "│", B(2))
-
-            mem_str = f"│ Mem: {g['mu']}/{g['mt']}"
-            sw(scr, R2+3, 0, mem_str.ljust(hw-1) + "│", B(1))
-
-            tc = B(3) if g['temp'] > 70 else B(6)
-            temp_str = f"│ Temp: {g['temp']:.0f}°C"
-            sw(scr, R2+4, 0, temp_str.ljust(hw-1) + "│", tc)
+            L.append(f"│ {pad(g['name'][:hw-4], hw-3)}│")
+            L.append(f"│ Use: {pad(bar(g['util'], bar_w), hw - 12)}%│")
+            tc = RED if g['temp'] > 70 else WHT
+            L.append(f"│ Mem: {pad(f\"{g['mu']}/{g['mt']}\", hw - 10)}│")
+            L.append(f"│ Temp:{tc} {g['temp']:.0f}°C{RST}{' ' * max(0, hw - 16)}│")
         else:
-            sw(scr, R2+1, 0, "│ No GPU detected".ljust(hw-1) + "│", B(6))
-            for i in range(2, 5):
-                sw(scr, R2+i, 0, "│" + " " * (hw - 2) + "│", B(1))
-        sw(scr, R2+5, 0, "╰" + "─" * (hw - 2) + "╯", B(2))
+            L.append(f"│ {pad('No GPU detected', hw - 3)}│")
+            L.append(f"│{pad('', hw - 2)}│")
+            L.append(f"│{pad('', hw - 2)}│")
+            L.append(f"│{pad('', hw - 2)}│")
 
-        # Models
-        sw(scr, R2, hw, "╭─ AI MODELS " + "─" * (hw - 13) + "╮", B(5))
-        fc = B(2) if fl_ok else B(3)
-        sw(scr, R2+1, hw, f"│ Florence-2: {'● Ready' if fl_ok else '○ Missing'}" + " " * max(0, hw - 22) + "│", fc)
-        if fl_ok:
-            sw(scr, R2+2, hw, f"│   {fl_s}" + " " * max(0, hw - len(fl_s) - 5) + "│", B(6))
+        fl = f"{GRN}● Ready{RST} ({fl_s})" if fl_ok else f"{RED}○ Missing{RST}"
+        glm = f"{GRN}● Ready{RST} ({glm_s})" if glm_ok else f"{RED}○ Missing{RST}"
+        L.append(f"│ Florence-2: {pad(fl, hw - 16)}││ GLM-OCR:    {pad(glm, hw - 16)}│")
+        L.append(f"│ Device: {pad('GPU' if gpus else 'CPU', hw - 11)}││{' ' * (hw - 2)}│")
+        L.append(f"╰{'─' * (hw - 2)}╯╰{'─' * (hw - 2)}╯")
+        L.append("")
 
-        gc = B(2) if glm_ok else B(3)
-        sw(scr, R2+3, hw, f"│ GLM-OCR:    {'● Ready' if glm_ok else '○ Missing'}" + " " * max(0, hw - 22) + "│", gc)
-        if glm_ok:
-            sw(scr, R2+4, hw, f"│   {glm_s}" + " " * max(0, hw - len(glm_s) - 5) + "│", B(6))
+        # ── Row 3: Stats + Top Actions ──
+        L.append(f"{'╭─ STATISTICS ─' + '─' * (hw - 14)}╮{'╭─ TOP ACTIONS ─' + '─' * (hw - 15)}╮")
+        L.append(f"│ {pad(f'Total: {tot}  Hour: {hr}  Err: {err}', hw - 3)}││{' ' * (hw - 2)}│")
+        L.append(f"│ {pad(f'Last: {last}', hw - 3)}││{' ' * (hw - 2)}│")
+        for i in range(3):
+            if i < len(top):
+                n, c = top[i]
+                dots = max(1, hw - len(n) - len(str(c)) - 8)
+                L.append(f"│{' ' * (hw - 2)}││ {n} {'·' * dots} {c}{' ' * max(0, hw - len(n) - len(str(c)) - dots - 8)}│")
+            else:
+                L.append(f"│{' ' * (hw - 2)}││{' ' * (hw - 2)}│")
+        L.append(f"│{' ' * (hw - 2)}││{' ' * (hw - 2)}│")
+        L.append(f"╰{'─' * (hw - 2)}╯╰{'─' * (hw - 2)}╯")
+        L.append("")
 
-        sw(scr, R2+5, hw, "╰" + "─" * (hw - 2) + "╯", B(5))
+        # ── Row 4: Controls + Logs ──
+        L.append(f"{'╭─ CONTROLS ─' + '─' * (hw - 13)}╮{'╭─ SERVER LOG ─' + '─' * (hw - 14)}╮")
+        keys = [("s","Start"),("x","Stop"),("h","Health"),("d","Download"),("r","Refresh"),("q","Quit")]
+        log_list = list(self.logs)
+        for i in range(6):
+            k, d = keys[i] if i < len(keys) else ("", "")
+            ll = log_list[i] if i < len(log_list) else ""
+            L.append(f"│ {k}  {d:<{hw - 6}}││ {ll:<{hw - 4}}│")
+        L.append(f"╰{'─' * (hw - 2)}╯╰{'─' * (hw - 2)}╯")
+        L.append("")
 
-        # ═══ ROW 3: STATS + TOP ACTIONS ═══
-        R3 = R2 + 6
+        # Status bar
+        sc = f"{GRN}● RUNNING{RST}" if running else f"{D}○ STOPPED{RST}"
+        L.append(f"{GLD}{'═' * W}{RST}")
+        L.append(f"{sc}  {D}q:quit  s:start  x:stop  h:health{RST}  {CYN}{last}{RST}")
 
-        sw(scr, R3, 0, "╭─ STATISTICS " + "─" * (hw - 13) + "╮", B(4))
-        sw(scr, R3+1, 0, f"│ Total: {tot}  Hour: {hr}  Err: {err}" + " " * max(0, hw - 38) + "│", B(6))
-        sw(scr, R3+2, 0, f"│ Last: {last}" + " " * max(0, hw - len(last) - 8) + "│", B(6))
-        for i in range(3, 5):
-            sw(scr, R3+i, 0, "│" + " " * (hw - 2) + "│", B(1))
-        sw(scr, R3+5, 0, "╰" + "─" * (hw - 2) + "╯", B(4))
-
-        sw(scr, R3, hw, "╭─ TOP ACTIONS " + "─" * (hw - 15) + "╮", B(5))
-        for i, (name, cnt) in enumerate(top[:5]):
-            dots = max(1, hw - len(name) - len(str(cnt)) - 10)
-            sw(scr, R3+1+i, hw, f"│ {name}" + " " * dots + f"{cnt}" + " " * 1 + "│", B(1))
-        for i in range(max(0, 5 - len(top))):
-            sw(scr, R3+1+len(top)+i, hw, "│" + " " * (hw - 2) + "│", B(1))
-        sw(scr, R3+5, hw, "╰" + "─" * (hw - 2) + "╯", B(5))
-
-        # ═══ ROW 4: CONTROLS + LOG ═══
-        R4 = R3 + 6
-
-        sw(scr, R4, 0, "╭─ CONTROLS " + "─" * (hw - 12) + "╮", B(2))
-        keys = [("s", "Start Server"), ("x", "Stop Server"), ("h", "Health Check"), ("d", "Download Models"), ("r", "Refresh"), ("q", "Quit")]
-        for i, (k, d) in enumerate(keys):
-            sw(scr, R4+1+i, 0, f"│ {k}  {d}" + " " * max(0, hw - len(d) - 6) + "│", B(2))
-        sw(scr, R4+6, 0, "╰" + "─" * (hw - 2) + "╯", B(2))
-
-        sw(scr, R4, hw, "╭─ SERVER LOG " + "─" * (hw - 14) + "╮", B(2))
-        log_list = list(self.logs)[-5:]
-        for i, ln in enumerate(log_list):
-            sw(scr, R4+1+i, hw, f"│ {ln}" + " " * max(0, hw - len(ln) - 3) + "│", B(6))
-        for i in range(max(0, 5 - len(log_list))):
-            sw(scr, R4+1+len(log_list)+i, hw, "│" + " " * (hw - 2) + "│", B(1))
-        sw(scr, R4+5, hw, "╰" + "─" * (hw - 2) + "╯", B(2))
-
-        # ═══ STATUS BAR ═══
-        sw(scr, H-1, 0, "═" * W, B(4))
-        sc = B(2) if running else B(6)
-        sw(scr, H-1, 1, "● Running" if running else "○ Stopped", sc)
-        sw(scr, H-1, 14, "q:quit s:start x:stop h:health d:download", B(6))
-        sw(scr, H-1, W - 22, f"Last: {last[:19]}", B(1))
-
-        # ═══ FLIP ═══
-        scr.noutrefresh()
-        curses.doupdate()
+        return "\n".join(L)
 
     def run(self):
+        old = termios.tcgetattr(sys.stdin)
         try:
+            tty.setraw(sys.stdin.fileno())
+            sys.stdout.write("\033[?25l")  # hide cursor
+            sys.stdout.flush()
+
             while True:
-                self.draw()
-                key = self.stdscr.getch()
-                if key == ord('q'): break
-                elif key == ord('s'): self.start()
-                elif key == ord('x'): self.stop()
-                elif key == ord('h'):
-                    self.logs.append(f"[{datetime.now():%H:%M:%S}] Health check...")
-                    threading.Thread(target=lambda: sh(f"cd {BASE} && bash scripts/health_check.sh 2>&1"), daemon=True).start()
-                elif key == ord('d'):
-                    self.logs.append(f"[{datetime.now():%H:%M:%S}] Downloading...")
-                    threading.Thread(target=lambda: sh(f"cd {BASE} && source .venv/bin/activate && python scripts/download_models.sh"), daemon=True).start()
+                # Draw
+                W = shutil.get_terminal_size((100, 40)).columns
+                output = self.draw()
+                sys.stdout.write(f"\033[H{output}\033[J")  # HOME + erase to end
+                sys.stdout.flush()
+
+                # Wait for input or 2s timeout
+                r, _, _ = select.select([sys.stdin], [], [], 2.0)
+                if r:
+                    ch = sys.stdin.read(1)
+                    if ch == 'q': break
+                    elif ch == 's': self.start()
+                    elif ch == 'x': self.stop()
+                    elif ch == 'h':
+                        self.logs.append(f"[{datetime.now():%H:%M:%S}] Health check...")
+                        threading.Thread(target=lambda: sh(f"cd {BASE} && bash scripts/health_check.sh 2>&1"), daemon=True).start()
+                    elif ch == 'd':
+                        self.logs.append(f"[{datetime.now():%H:%M:%S}] Downloading...")
+                        threading.Thread(target=lambda: sh(f"cd {BASE} && source .venv/bin/activate && python scripts/download_models.sh"), daemon=True).start()
         except KeyboardInterrupt:
             pass
-
-
-def main(stdscr):
-    Dashboard(stdscr).run()
+        finally:
+            sys.stdout.write("\033[?25h")  # show cursor
+            sys.stdout.write("\033[2J\033[H")  # clear + home
+            sys.stdout.flush()
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
 
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    Dashboard().run()
